@@ -1,9 +1,9 @@
 <?php
 /**
- * Plugin Name: AI Alt Text Generator (GPT)
+ * Plugin Name: Farlo AI Alt Text Generator (GPT)
  * Description: Automatically generates concise, accessible ALT text for images using the OpenAI API. Includes auto-on-upload, Media Library bulk action, REST + WP-CLI, and a settings page.
  * Version: 1.0.0
- * Author: Ben + ChatGPT
+ * Author: Ben O
  * License: GPL2
  */
 
@@ -24,6 +24,7 @@ class AI_Alt_Text_Generator_GPT {
         add_filter('handle_bulk_actions-upload', [$this, 'handle_bulk_action'], 10, 3);
 
         add_filter('media_row_actions', [$this, 'row_action_link'], 10, 2);
+        add_filter('attachment_fields_to_edit', [$this, 'attachment_fields_to_edit'], 15, 2);
         add_action('rest_api_init', [$this, 'register_rest_routes']);
         add_action('admin_enqueue_scripts', [$this, 'enqueue_admin']);
 
@@ -77,9 +78,10 @@ class AI_Alt_Text_Generator_GPT {
         if (!current_user_can('manage_options')) return;
         $opts = get_option(self::OPTION_KEY, []);
         $nonce = wp_create_nonce(self::NONCE_KEY);
+        $has_key = !empty($opts['api_key']);
         ?>
         <div class="wrap">
-            <h1>AI Alt Text Generator (GPT)</h1>
+            <h1>Farlo AI Alt Text Generator (GPT)</h1>
             <form method="post" action="options.php">
                 <?php settings_fields('ai_alt_gpt_group'); ?>
                 <?php $o = wp_parse_args($opts, []); ?>
@@ -89,6 +91,11 @@ class AI_Alt_Text_Generator_GPT {
                         <td>
                             <input type="password" name="<?php echo esc_attr(self::OPTION_KEY); ?>[api_key]" id="api_key" value="<?php echo esc_attr($o['api_key'] ?? ''); ?>" class="regular-text" />
                             <p class="description">Stored in wp_options. Ensure only trusted admins have access.</p>
+                            <?php if ($has_key) : ?>
+                                <div class="notice notice-success inline"><p><span class="dashicons dashicons-saved" aria-hidden="true"></span> <?php echo esc_html__('Connected. Key saved in settings.', 'ai-alt-gpt'); ?></p></div>
+                            <?php else : ?>
+                                <div class="notice notice-warning inline"><p><span class="dashicons dashicons-warning" aria-hidden="true"></span> <?php echo esc_html__('Enter an OpenAI API key to enable generation.', 'ai-alt-gpt'); ?></p></div>
+                            <?php endif; ?>
                         </td>
                     </tr>
                     <tr>
@@ -242,6 +249,26 @@ class AI_Alt_Text_Generator_GPT {
         return $actions;
     }
 
+    public function attachment_fields_to_edit($fields, $post){
+        if (!$this->is_image($post->ID)){
+            return $fields;
+        }
+
+        $button = sprintf(
+            '<button type="button" class="button ai-alt-generate" data-id="%1$d">%2$s</button>',
+            intval($post->ID),
+            esc_html__('Generate Alt', 'ai-alt-gpt')
+        );
+
+        $fields['ai_alt_generate'] = [
+            'label' => __('AI Alt Text', 'ai-alt-gpt'),
+            'input' => 'html',
+            'html'  => $button . '<p class="description">' . esc_html__('Use AI to suggest alternative text for this image.', 'ai-alt-gpt') . '</p>',
+        ];
+
+        return $fields;
+    }
+
     public function register_rest_routes(){
         register_rest_route('ai-alt/v1', '/generate/(?P<id>\d+)', [
             'methods'  => 'POST',
@@ -298,23 +325,71 @@ add_action('admin_footer-upload.php', function(){
     ?>
     <script>
     (function($){
-        $(document).on('click', 'a.ai-alt-generate', function(e){
+        function restore(btn){
+            var original = btn.data('original-text');
+            btn.text(original || 'Generate Alt');
+            if (btn.is('button, input')){
+                btn.prop('disabled', false);
+            }
+        }
+
+        function updateAltField(id, value, context){
+            var selectors = [
+                '#attachment_alt',
+                '[data-setting="alt"]',
+                '[name="attachments[' + id + '][image_alt]"]'
+            ];
+            var field;
+            selectors.some(function(sel){
+                var scoped = context && context.length ? context.find(sel) : $(sel);
+                if (scoped.length){
+                    field = scoped.first();
+                    return true;
+                }
+                return false;
+            });
+            if (field && field.length){
+                field.val(value).trigger('change');
+            }
+        }
+
+        $(document).on('click', '.ai-alt-generate', function(e){
             e.preventDefault();
-            const id = $(this).data('id');
-            const url = (window.AI_ALT_GPT ? AI_ALT_GPT.rest : '') + id;
-            if(!url){ return alert('AI ALT: REST URL missing.'); }
-            $(this).text('Generating…');
-            fetch(url, { method:'POST', headers: {'X-WP-Nonce': (window.wpApiSettings? wpApiSettings.nonce : '') }} )
-                .then(r=>r.json())
-                .then(data=>{
-                    if(data && data.alt){
-                        alert('ALT generated: '+data.alt);
-                        location.reload();
+            if (!window.AI_ALT_GPT || !AI_ALT_GPT.rest){
+                return alert('AI ALT: REST URL missing.');
+            }
+
+            var btn = $(this);
+            var id = btn.data('id');
+            if (!id){ return alert('AI ALT: Attachment ID missing.'); }
+
+            if (typeof btn.data('original-text') === 'undefined'){
+                btn.data('original-text', btn.text());
+            }
+
+            btn.text('Generating…');
+            if (btn.is('button, input')){
+                btn.prop('disabled', true);
+            }
+
+            var headers = {'X-WP-Nonce': (AI_ALT_GPT.nonce || (window.wpApiSettings ? wpApiSettings.nonce : ''))};
+            var context = btn.closest('.compat-item, .attachment-details, .media-modal');
+
+            fetch(AI_ALT_GPT.rest + id, { method:'POST', headers: headers })
+                .then(function(r){ return r.json(); })
+                .then(function(data){
+                    if (data && data.alt){
+                        updateAltField(id, data.alt, context);
+                        alert('ALT generated: ' + data.alt);
+                        if (!context.length){
+                            location.reload();
+                        }
                     } else {
                         alert('Failed to generate ALT');
                     }
                 })
-                .catch(()=> alert('Request failed.'));
+                .catch(function(){ alert('Request failed.'); })
+                .then(function(){ restore(btn); });
         });
     })(jQuery);
     </script>
