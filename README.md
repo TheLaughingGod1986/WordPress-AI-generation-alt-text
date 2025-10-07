@@ -21,9 +21,9 @@ Automatically generate concise, accessible alternative text for WordPress media 
 2. Ensure the plugin files live at:
    - `wp-content/plugins/ai-alt-gpt/ai-alt-gpt.php`
    - `wp-content/plugins/ai-alt-gpt/assets/ai-alt-admin.js`
+   - `wp-content/plugins/ai-alt-gpt/assets/ai-alt-dashboard.js`
+   - `wp-content/plugins/ai-alt-gpt/assets/ai-alt-dashboard.css`
 3. Activate **AI Alt Text Generator (GPT)** from the WordPress Plugins admin page.
-
-> 💡 A `docker-compose.yml` is included to spin up a local WordPress + MySQL environment (`docker compose up`), mounting the plugin into the container for rapid testing.
 
 ## Configuration
 1. Navigate to **Media → AI Alt Text (GPT)**.

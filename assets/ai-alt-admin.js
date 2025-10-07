@@ -12,9 +12,14 @@
     function updateAltField(id, value, context){
         var selectors = [
             '#attachment_alt',
-            '[data-setting="alt"]',
+            '#attachments-' + id + '-alt',
+            '[data-setting="alt"] textarea',
+            '[data-setting="alt"] input',
+            '[name="attachments[' + id + '][alt]"]',
+            '[name="attachments[' + id + '][_wp_attachment_image_alt]"]',
             '[name="attachments[' + id + '][image_alt]"]'
         ];
+
         var field;
         selectors.some(function(sel){
             var scoped = context ? context.find(sel) : $(sel);
@@ -24,8 +29,21 @@
             }
             return false;
         });
+
         if (field && field.length){
-            field.val(value).trigger('change');
+            field.val(value);
+            field.text(value);
+            field.attr('value', value);
+            field.trigger('input').trigger('change');
+        }
+
+        if (window.wp && wp.media && typeof wp.media.attachment === 'function'){
+            var attachment = wp.media.attachment(id);
+            if (attachment){
+                try {
+                    attachment.set('alt', value);
+                } catch (e) {}
+            }
         }
     }
 
@@ -68,10 +86,13 @@
                     location.reload();
                 }
             } else {
-                alert('Failed to generate ALT');
+                var message = (r && (r.message || (r.data && r.data.message))) || 'Failed to generate ALT';
+                alert('AI ALT: ' + message);
             }
-        }).fail(function(){
-            alert('Error communicating');
+        }).fail(function(xhr){
+            var json = xhr.responseJSON || {};
+            var message = json.message || (json.data && json.data.message) || 'Error communicating';
+            alert('AI ALT: ' + message);
         }).always(function(){
             restoreButton(btn);
         });

@@ -13,6 +13,8 @@ class AI_Alt_Text_Generator_GPT {
     const OPTION_KEY = 'ai_alt_gpt_settings';
     const NONCE_KEY  = 'ai_alt_gpt_nonce';
 
+    private $stats_cache = null;
+
     public function __construct() {
         register_activation_hook(__FILE__, [$this, 'activate']);
 
@@ -76,12 +78,60 @@ class AI_Alt_Text_Generator_GPT {
 
     public function render_settings_page() {
         if (!current_user_can('manage_options')) return;
-        $opts = get_option(self::OPTION_KEY, []);
+        $opts  = get_option(self::OPTION_KEY, []);
+        $stats = $this->get_media_stats();
         $nonce = wp_create_nonce(self::NONCE_KEY);
         $has_key = !empty($opts['api_key']);
         ?>
         <div class="wrap">
             <h1>Farlo AI Alt Text Generator (GPT)</h1>
+
+            <div class="ai-alt-dashboard" data-stats='<?php echo esc_attr(wp_json_encode($stats)); ?>'>
+                <div class="ai-alt-dashboard__grid">
+                    <div class="ai-alt-card">
+                        <span class="ai-alt-card__label">Images</span>
+                        <span class="ai-alt-card__value"><?php echo esc_html(number_format_i18n($stats['total'])); ?></span>
+                        <span class="ai-alt-card__hint">Total image attachments</span>
+                    </div>
+                    <div class="ai-alt-card">
+                        <span class="ai-alt-card__label">With ALT</span>
+                        <span class="ai-alt-card__value"><?php echo esc_html(number_format_i18n($stats['with_alt'])); ?></span>
+                        <span class="ai-alt-card__hint"><?php echo esc_html($stats['coverage']); ?>% coverage</span>
+                    </div>
+                    <div class="ai-alt-card ai-alt-card--warning">
+                        <span class="ai-alt-card__label">Missing</span>
+                        <span class="ai-alt-card__value"><?php echo esc_html(number_format_i18n($stats['missing'])); ?></span>
+                        <span class="ai-alt-card__hint">Needs attention</span>
+                    </div>
+                    <div class="ai-alt-card">
+                        <span class="ai-alt-card__label">AI Generated</span>
+                        <span class="ai-alt-card__value"><?php echo esc_html(number_format_i18n($stats['generated'])); ?></span>
+                        <span class="ai-alt-card__hint">Tracked by plugin</span>
+                    </div>
+                </div>
+
+                <div class="ai-alt-dashboard__viz">
+                    <div class="ai-alt-progress">
+                        <div class="ai-alt-progress__bar">
+                            <span style="width: <?php echo esc_attr($stats['coverage']); ?>%"></span>
+                        </div>
+                        <p><strong><?php echo esc_html($stats['coverage']); ?>%</strong> of images currently include ALT text.</p>
+                    </div>
+                    <div class="ai-alt-chart">
+                        <canvas id="ai-alt-coverage" width="220" height="220" aria-label="ALT coverage chart"></canvas>
+                        <div class="ai-alt-chart__legend">
+                            <span class="ai-alt-chart__dot ai-alt-chart__dot--with"></span> With ALT
+                            <span class="ai-alt-chart__dot ai-alt-chart__dot--missing"></span> Missing
+                        </div>
+                    </div>
+                </div>
+
+                <div class="ai-alt-dashboard__actions">
+                    <button type="button" class="button button-primary ai-alt-generate-missing" data-total="<?php echo esc_attr($stats['missing']); ?>" <?php disabled($stats['missing'] <= 0); ?>><?php esc_html_e('Generate ALT for Missing Images', 'ai-alt-gpt'); ?></button>
+                    <div class="ai-alt-dashboard__status" aria-live="polite"></div>
+                </div>
+            </div>
+
             <form method="post" action="options.php">
                 <?php settings_fields('ai_alt_gpt_group'); ?>
                 <?php $o = wp_parse_args($opts, []); ?>
@@ -171,6 +221,95 @@ class AI_Alt_Text_Generator_GPT {
         return strpos((string)$mime, 'image/') === 0;
     }
 
+    private function get_media_stats(){
+        if (is_array($this->stats_cache)){
+            return $this->stats_cache;
+        }
+
+        global $wpdb;
+
+        $total = (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_type = %s AND post_status = 'inherit' AND post_mime_type LIKE %s",
+            'attachment', 'image/%'
+        ));
+
+        $with_alt = (int) $wpdb->get_var(
+            "SELECT COUNT(DISTINCT p.ID)
+             FROM {$wpdb->posts} p
+             INNER JOIN {$wpdb->postmeta} m ON p.ID = m.post_id
+             WHERE p.post_type = 'attachment'
+               AND p.post_status = 'inherit'
+               AND p.post_mime_type LIKE 'image/%'
+               AND m.meta_key = '_wp_attachment_image_alt'
+               AND TRIM(m.meta_value) <> ''"
+        );
+
+        $generated = (int) $wpdb->get_var(
+            "SELECT COUNT(DISTINCT post_id) FROM {$wpdb->postmeta} WHERE meta_key = '_ai_alt_generated_at'"
+        );
+
+        $coverage = $total ? round(($with_alt / $total) * 100, 1) : 0;
+        $missing  = max(0, $total - $with_alt);
+
+        $this->stats_cache = [
+            'total'     => $total,
+            'with_alt'  => $with_alt,
+            'missing'   => $missing,
+            'generated' => $generated,
+            'coverage'  => $coverage,
+        ];
+
+        return $this->stats_cache;
+    }
+
+    private function get_missing_attachment_ids($limit = 5){
+        global $wpdb;
+        $limit = intval($limit);
+        if ($limit <= 0){
+            $limit = 5;
+        }
+
+        $sql = $wpdb->prepare(
+            "SELECT p.ID
+             FROM {$wpdb->posts} p
+             LEFT JOIN {$wpdb->postmeta} m
+               ON (p.ID = m.post_id AND m.meta_key = '_wp_attachment_image_alt')
+             WHERE p.post_type = %s
+               AND p.post_status = 'inherit'
+               AND p.post_mime_type LIKE %s
+               AND (m.meta_value IS NULL OR TRIM(m.meta_value) = '')
+             ORDER BY p.ID DESC
+             LIMIT %d",
+            'attachment', 'image/%', $limit
+        );
+
+        return array_map('intval', (array) $wpdb->get_col($sql));
+    }
+
+    private function redact_api_token($message){
+        if (!is_string($message) || $message === ''){
+            return $message;
+        }
+
+        $mask = function($token){
+            $len = strlen($token);
+            if ($len <= 8){
+                return str_repeat('*', $len);
+            }
+            return substr($token, 0, 4) . str_repeat('*', $len - 8) . substr($token, -4);
+        };
+
+        $message = preg_replace_callback('/(Incorrect API key provided:\s*)(\S+)/i', function($matches) use ($mask){
+            return $matches[1] . $mask($matches[2]);
+        }, $message);
+
+        $message = preg_replace_callback('/(sk-[A-Za-z0-9]{4})([A-Za-z0-9]{10,})([A-Za-z0-9]{4})/i', function($matches){
+            return $matches[1] . str_repeat('*', strlen($matches[2])) . $matches[3];
+        }, $message);
+
+        return $message;
+    }
+
     public function maybe_generate_on_upload($attachment_id){
         $opts = get_option(self::OPTION_KEY, []);
         if (empty($opts['enable_on_upload'])) return;
@@ -212,7 +351,20 @@ class AI_Alt_Text_Generator_GPT {
         $code = wp_remote_retrieve_response_code($response);
         $data = json_decode(wp_remote_retrieve_body($response), true);
         if ($code >= 300 || empty($data['choices'][0]['message']['content'])) {
-            return new \WP_Error('api_error', 'OpenAI API error', ['status' => $code, 'body' => $data]);
+            $api_message = 'OpenAI API error';
+            if (isset($data['error']['message']) && is_string($data['error']['message'])) {
+                $api_message = $data['error']['message'];
+            } elseif (isset($data['choices'][0]['message']['content'])) {
+                $api_message = $data['choices'][0]['message']['content'];
+            }
+
+            $error_data = ['status' => $code];
+            if (!empty($data)) {
+                $error_data['body'] = $data;
+            }
+
+            $api_message = $this->redact_api_token($api_message);
+            return new \WP_Error('api_error', $api_message, $error_data);
         }
 
         $alt = trim($data['choices'][0]['message']['content']);
@@ -222,6 +374,7 @@ class AI_Alt_Text_Generator_GPT {
         update_post_meta($attachment_id, '_ai_alt_source', $source);
         update_post_meta($attachment_id, '_ai_alt_model', $model);
         update_post_meta($attachment_id, '_ai_alt_generated_at', current_time('mysql'));
+        $this->stats_cache = null;
 
         return $alt;
     }
@@ -281,15 +434,81 @@ class AI_Alt_Text_Generator_GPT {
             },
             'permission_callback' => '__return_true',
         ]);
+
+        register_rest_route('ai-alt/v1', '/generate-missing', [
+            'methods'  => 'POST',
+            'callback' => function($req){
+                if (!current_user_can('upload_files')){
+                    return new \WP_Error('forbidden', 'No permission', ['status' => 403]);
+                }
+
+                $batch = max(1, min(20, intval($req->get_param('batch')) ?: 5));
+                $ids   = $this->get_missing_attachment_ids($batch);
+
+                if (empty($ids)){
+                    return [
+                        'processed' => 0,
+                        'errors'    => 0,
+                        'completed' => true,
+                        'stats'     => $this->get_media_stats(),
+                    ];
+                }
+
+                $processed = 0; $errors = 0; $messages = [];
+                foreach ($ids as $aid){
+                    $res = $this->generate_and_save($aid, 'dashboard');
+                    if (is_wp_error($res)){
+                        $errors++;
+                        $messages[] = sprintf('ID %d: %s', $aid, $res->get_error_message());
+                    } else {
+                        $processed++;
+                    }
+                }
+
+                $this->stats_cache = null;
+                return [
+                    'processed' => $processed,
+                    'errors'    => $errors,
+                    'messages'  => $messages,
+                    'completed' => count($ids) < $batch,
+                    'stats'     => $this->get_media_stats(),
+                ];
+            },
+            'permission_callback' => '__return_true',
+        ]);
     }
 
     public function enqueue_admin($hook){
-        if ($hook !== 'upload.php') return;
-        wp_enqueue_script('ai-alt-gpt-admin', plugin_dir_url(__FILE__) . 'assets/ai-alt-admin.js', ['jquery'], '1.0.0', true);
-        wp_localize_script('ai-alt-gpt-admin', 'AI_ALT_GPT', [
-            'nonce' => wp_create_nonce(self::NONCE_KEY),
-            'rest'  => esc_url_raw( rest_url('ai-alt/v1/generate/') ),
-        ]);
+        if ($hook === 'upload.php'){
+            wp_enqueue_script('ai-alt-gpt-admin', plugin_dir_url(__FILE__) . 'assets/ai-alt-admin.js', ['jquery'], '1.0.1', true);
+            wp_localize_script('ai-alt-gpt-admin', 'AI_ALT_GPT', [
+                'nonce' => wp_create_nonce('wp_rest'),
+                'rest'  => esc_url_raw( rest_url('ai-alt/v1/generate/') ),
+            ]);
+        }
+
+        if ($hook === 'media_page_ai-alt-gpt'){
+            wp_enqueue_style('ai-alt-gpt-dashboard', plugin_dir_url(__FILE__) . 'assets/ai-alt-dashboard.css', [], '1.0.0');
+            wp_enqueue_script('ai-alt-gpt-dashboard', plugin_dir_url(__FILE__) . 'assets/ai-alt-dashboard.js', ['jquery'], '1.0.0', true);
+            wp_localize_script('ai-alt-gpt-dashboard', 'AI_ALT_GPT_DASH', [
+                'nonce'       => wp_create_nonce('wp_rest'),
+                'rest'        => esc_url_raw( rest_url('ai-alt/v1/generate/') ),
+                'restMissing' => esc_url_raw( rest_url('ai-alt/v1/generate-missing') ),
+                'stats'       => $this->get_media_stats(),
+                'l10n'        => [
+                    'processing' => __('Generating ALT text…', 'ai-alt-gpt'),
+                    'complete'   => __('All missing ALT text processed!', 'ai-alt-gpt'),
+                    'error'      => __('Something went wrong. Check console for details.', 'ai-alt-gpt'),
+                    'summary'    => __('Generated %1$d images (%2$d errors).', 'ai-alt-gpt'),
+                    'restUnavailable' => __('REST endpoint unavailable', 'ai-alt-gpt'),
+                ],
+                'labels'      => [
+                    'start'    => __('Generate ALT for Missing Images', 'ai-alt-gpt'),
+                    'allDone'  => __('All images have ALT text', 'ai-alt-gpt'),
+                    'running'  => __('Generating…', 'ai-alt-gpt'),
+                ],
+            ]);
+        }
     }
 
     public function wpcli_command($args, $assoc){
@@ -336,7 +555,11 @@ add_action('admin_footer-upload.php', function(){
         function updateAltField(id, value, context){
             var selectors = [
                 '#attachment_alt',
-                '[data-setting="alt"]',
+                '#attachments-' + id + '-alt',
+                '[data-setting="alt"] textarea',
+                '[data-setting="alt"] input',
+                '[name="attachments[' + id + '][alt]"]',
+                '[name="attachments[' + id + '][_wp_attachment_image_alt]"]',
                 '[name="attachments[' + id + '][image_alt]"]'
             ];
             var field;
@@ -349,7 +572,17 @@ add_action('admin_footer-upload.php', function(){
                 return false;
             });
             if (field && field.length){
-                field.val(value).trigger('change');
+                field.val(value);
+                field.text(value);
+                field.attr('value', value);
+                field.trigger('input').trigger('change');
+            }
+
+            if (window.wp && wp.media && typeof wp.media.attachment === 'function'){
+                var attachment = wp.media.attachment(id);
+                if (attachment){
+                    try { attachment.set('alt', value); } catch (err) {}
+                }
             }
         }
 
@@ -385,10 +618,14 @@ add_action('admin_footer-upload.php', function(){
                             location.reload();
                         }
                     } else {
-                        alert('Failed to generate ALT');
+                        var message = (data && (data.message || (data.data && data.data.message))) || 'Failed to generate ALT';
+                        alert('AI ALT: ' + message);
                     }
                 })
-                .catch(function(){ alert('Request failed.'); })
+                .catch(function(err){
+                    var message = (err && err.message) ? err.message : 'Request failed.';
+                    alert('AI ALT: ' + message);
+                })
                 .then(function(){ restore(btn); });
         });
     })(jQuery);
