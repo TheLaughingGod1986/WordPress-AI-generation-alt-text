@@ -20,6 +20,14 @@
     const restStats = dash.restStats || null;
     const restQueue = dash.restQueue || null;
 
+    const palette = {
+        accent: '#2271b1',
+        missing: '#d63638',
+        track: 'rgba(208, 215, 222, 0.6)',
+        text: '#1d2327',
+        textMuted: '#50575e'
+    };
+
     const l10n = $.extend({
         processing: 'Generating ALT text…',
         complete: 'All missing ALT text processed!',
@@ -27,6 +35,8 @@
         error: 'Something went wrong. Check console for details.',
         restUnavailable: 'REST endpoint unavailable',
         coverageCopy: 'of images currently include ALT text.',
+        coverageSuffix: 'coverage',
+        coverageValue: 'ALT coverage at %s',
         noRequests: 'None yet',
         summary: 'Generated %1$d images (%2$d errors).',
         queueQueued: 'Queued for background processing.',
@@ -36,7 +46,15 @@
         stopLabel: 'Force Stop',
         stopProgress: 'Stopping…',
         stopError: 'Unable to stop queue.',
-        noAudit: 'No usage data recorded yet.'
+        runBatch: 'Run Batch Now',
+        runBatchBusy: 'Running…',
+        runBatchMessage: 'Batch processed via dashboard trigger.',
+        autoRetry: 'No progress detected. Attempting automatic retry…',
+        noMessages: 'No queue messages yet.',
+        noAudit: 'No usage data recorded yet.',
+        pending: 'Pending',
+        waitingForCron: 'Waiting for cron',
+        notAvailable: 'N/A'
     }, dash.l10n || {});
 
     const labels = $.extend({
@@ -50,11 +68,14 @@
 
     const elements = {
         status: $dashboard.find('.ai-alt-dashboard__status'),
+        progressWrap: $dashboard.find('.ai-alt-progress__bar'),
         bar: $dashboard.find('.ai-alt-progress__bar span'),
         btnMissing: $dashboard.find('.ai-alt-generate-missing'),
         btnAll: $dashboard.find('.ai-alt-regenerate-all'),
         stopQueue: $dashboard.find('.ai-alt-stop-queue'),
-        runBatch: $dashboard.find('.ai-alt-queue-run')
+        runBatch: $dashboard.find('.ai-alt-queue-run'),
+        queueSummary: $dashboard.find('.ai-alt-queue-summary'),
+        queueLog: $dashboard.find('.ai-alt-queue-log')
     };
 
     const usageEls = {
@@ -67,6 +88,14 @@
 
     const canvas = $dashboard.length ? document.getElementById('ai-alt-coverage') : null;
     const ctx = canvas ? canvas.getContext('2d') : null;
+
+    let lastProgress = {
+        processed: currentStats.queue ? currentStats.queue.processed || 0 : 0,
+        errors: currentStats.queue ? currentStats.queue.errors || 0 : 0,
+        timestamp: Date.now()
+    };
+    let autoRetryCooldown = false;
+    const autoRetryInterval = parseInt(dash.autoRetryInterval || 60000, 10);
 
     function fmtNumber(num){
         return (Number(num) || 0).toLocaleString();
@@ -110,24 +139,24 @@
 
         ctx.beginPath();
         ctx.lineWidth = lineWidth;
-        ctx.strokeStyle = 'rgba(148, 163, 184, 0.18)';
+        ctx.strokeStyle = palette.track;
         ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
         ctx.stroke();
 
-        drawArc(-Math.PI / 2, withAltFraction, '#2563eb');
-        drawArc(-Math.PI / 2 + withAltFraction * Math.PI * 2, missingFraction, '#fb923c');
+        drawArc(-Math.PI / 2, withAltFraction, palette.accent);
+        drawArc(-Math.PI / 2 + withAltFraction * Math.PI * 2, missingFraction, palette.missing);
 
         const coverageNumber = Number(stats.coverage || 0);
         const coverageText = coverageNumber.toFixed(1).replace(/\.0$/, '') + '%';
 
         ctx.font = '600 28px "Inter", "Segoe UI", sans-serif';
-        ctx.fillStyle = '#0f172a';
+        ctx.fillStyle = palette.text;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillText(coverageText, centerX, centerY - 8);
 
         ctx.font = '13px "Inter", "Segoe UI", sans-serif';
-        ctx.fillStyle = '#64748b';
+        ctx.fillStyle = palette.textMuted;
         ctx.fillText('coverage', centerX, centerY + 18);
     }
 
@@ -178,6 +207,39 @@
             const lastDisplay = usage.last_request_formatted || usage.last_request || l10n.noRequests;
             usageEls.last.text(lastDisplay);
         }
+    }
+
+    function renderQueueSummary(queue){
+        if (!$dashboard.length){ return; }
+        const $summary = elements.queueSummary.length ? elements.queueSummary : $dashboard.find('.ai-alt-queue-summary');
+        if (!$summary.length){ return; }
+
+        if (!queue || !queue.active){
+            $summary.addClass('is-hidden');
+            return;
+        }
+
+        const fallback = l10n.notAvailable || 'N/A';
+        const pending = l10n.pending || 'Pending';
+        const waiting = l10n.waitingForCron || 'Waiting for cron';
+
+        $summary.removeClass('is-hidden');
+
+        const map = {
+            scope: queue.scope_label || queue.scope || fallback,
+            batch: typeof queue.batch !== 'undefined' ? fmtNumber(queue.batch || 0) : fallback,
+            processed: typeof queue.processed !== 'undefined' ? fmtNumber(queue.processed || 0) : fallback,
+            errors: typeof queue.errors !== 'undefined' ? fmtNumber(queue.errors || 0) : fallback,
+            last_run: queue.last_run_formatted || queue.last_run || pending,
+            next_run: queue.next_run || waiting
+        };
+
+        Object.keys(map).forEach(function(key){
+            const $field = $summary.find('[data-queue-field="' + key + '"]');
+            if ($field.length){
+                $field.text(map[key]);
+            }
+        });
     }
 
     function progressSuffix(){
@@ -234,6 +296,7 @@
     }
 
     function updateQueue(queue, wasActive){
+        renderQueueSummary(queue);
         if (!queue || !queue.active){
             clearPoll();
             updateButtons(false);
@@ -265,6 +328,39 @@
         }
     }
 
+    function runQueueBatch(manual){
+        if (!restQueue){ return; }
+        const $btn = elements.runBatch;
+        if (manual && $btn.length){
+            $btn.prop('disabled', true).text(l10n.runBatchBusy || 'Running…');
+        }
+        fetch(restQueue, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: {
+                'X-WP-Nonce': dash.nonce,
+                'Accept': 'application/json'
+            }
+        })
+        .then(function(res){ return res.ok ? res.json() : null; })
+        .then(function(data){
+            if (data && data.stats){
+                renderStats(data.stats);
+                if (manual){
+                    setStatus(l10n.runBatchMessage || 'Batch processed via dashboard trigger.', true);
+                }
+            }
+        })
+        .catch(function(err){ console.error('AI ALT queue run', err); })
+        .finally(function(){
+            if (manual && $btn.length){
+                $btn.prop('disabled', false).text(l10n.runBatch || 'Run Batch Now');
+            }
+            autoRetryCooldown = false;
+            lastProgress.timestamp = Date.now();
+        });
+    }
+
     function renderStats(stats){
         if (!stats){ return; }
         const wasActive = lastQueueActive;
@@ -279,30 +375,72 @@
             values.eq(3).text(fmtNumber(stats.generated || 0));
             $dashboard.find('.ai-alt-card__value--tokens').text(fmtNumber((stats.usage && stats.usage.total) || 0));
 
-            const coverageNumber = Number(stats.coverage || 0);
-            const coverageText = coverageNumber.toFixed(1).replace(/\.0$/, '');
-            $dashboard.find('.ai-alt-card__hint').eq(1).text(coverageText + '% coverage');
-            $dashboard.find('.ai-alt-dashboard__coverage').html('<strong>' + coverageText + '%</strong> ' + (l10n.coverageCopy || 'of images currently include ALT text.'));
+            const coverageNumberRaw = Number(stats.coverage || 0);
+            const coverageNumber = Math.max(0, Math.min(100, coverageNumberRaw));
+            const coverageDisplay = coverageNumber.toFixed(1).replace(/\.0$/, '');
+            const coveragePercent = coverageDisplay + '%';
+            const coverageValueText = (l10n.coverageValue || 'ALT coverage at %s').replace('%s', coveragePercent);
+
+            $dashboard.find('.ai-alt-card__hint').eq(1).text(coveragePercent + ' ' + (l10n.coverageSuffix || 'coverage'));
+
+            const $coverageSummary = $dashboard.find('#ai-alt-coverage-summary');
+            if ($coverageSummary.length){
+                $dashboard.find('#ai-alt-coverage-value').text(coveragePercent);
+            } else {
+                $dashboard.find('.ai-alt-dashboard__coverage strong').first().text(coveragePercent);
+            }
+
             if (elements.bar.length){
                 elements.bar.css('width', coverageNumber + '%');
+            }
+            if (elements.progressWrap && elements.progressWrap.length){
+                elements.progressWrap.attr({
+                    'aria-valuenow': coverageNumber.toFixed(1),
+                    'aria-valuetext': coverageValueText
+                });
             }
             drawChart(stats);
         }
 
+        renderQueueSummary(stats.queue || {});
         updateUsage(stats.usage || {});
         renderAudit(stats.audit || []);
         updateQueue(stats.queue || {}, wasActive);
 
+        if (stats.queue && stats.queue.active){
+            if (stats.queue.processed !== lastProgress.processed || stats.queue.errors !== lastProgress.errors){
+                lastProgress.processed = stats.queue.processed || 0;
+                lastProgress.errors = stats.queue.errors || 0;
+                lastProgress.timestamp = Date.now();
+                autoRetryCooldown = false;
+            } else if (!running && restQueue && !autoRetryCooldown && (Date.now() - lastProgress.timestamp) >= autoRetryInterval){
+                autoRetryCooldown = true;
+                setStatus(l10n.autoRetry || 'No progress detected. Attempting automatic retry…', true);
+                runQueueBatch(false);
+            }
+        } else {
+            lastProgress = {
+                processed: stats.queue ? stats.queue.processed || 0 : 0,
+                errors: stats.queue ? stats.queue.errors || 0 : 0,
+                timestamp: Date.now()
+            };
+            autoRetryCooldown = false;
+        }
+
         if ($dashboard.length){
-            const $log = $dashboard.find('.ai-alt-queue-log ul');
-            if ($log.length){
-                $log.empty();
+            const $logWrap = elements.queueLog.length ? elements.queueLog : $dashboard.find('.ai-alt-queue-log');
+            const $logList = $logWrap.find('ul');
+            if ($logWrap.length){
+                $logWrap.toggleClass('is-hidden', !(stats.queue && stats.queue.active));
+            }
+            if ($logList.length){
+                $logList.empty();
                 if (stats.queue && stats.queue.last_messages && stats.queue.last_messages.length){
                     stats.queue.last_messages.forEach(function(msg){
-                        $log.append($('<li/>').text(msg));
+                        $logList.append($('<li/>').text(msg));
                     });
                 } else {
-                    $log.append($('<li/>').text(l10n.noMessages || 'No queue messages yet.'));
+                    $logList.append($('<li/>').text(l10n.noMessages || 'No queue messages yet.'));
                 }
             }
         }
@@ -470,33 +608,9 @@
                 $btn.prop('disabled', false).text(l10n.stopLabel || 'Force Stop');
                 setStatus(l10n.stopError || 'Unable to stop queue.', false);
             });
-        });
-
-        elements.runBatch.on('click', function(){
-            if (!restQueue){ return; }
-            const $btn = $(this);
-            if ($btn.prop('disabled')){ return; }
-            $btn.prop('disabled', true).text(l10n.runBatchBusy || 'Running…');
-            fetch(restQueue, {
-                method: 'POST',
-                credentials: 'same-origin',
-                headers: {
-                    'X-WP-Nonce': dash.nonce,
-                    'Accept': 'application/json'
-                }
-            })
-            .then(function(res){ return res.ok ? res.json() : null; })
-            .then(function(data){
-                if (data && data.stats){
-                    renderStats(data.stats);
-                    setStatus(l10n.runBatchMessage || 'Batch processed via dashboard.', true);
-                }
-            })
-            .catch(function(err){ console.error('AI ALT queue run', err); })
-            .finally(function(){
-                $btn.prop('disabled', false).text(l10n.runBatch || 'Run Batch Now');
             });
-        });
+
+        elements.runBatch.on('click', function(){ runQueueBatch(true); });
     }
 
     window.addEventListener('ai-alt-stats-update', function(evt){

@@ -14,6 +14,7 @@ class AI_Alt_Text_Generator_GPT {
     const NONCE_KEY  = 'ai_alt_gpt_nonce';
     const QUEUE_OPTION = 'ai_alt_gpt_queue';
     const CRON_HOOK = 'ai_alt_gpt_process_queue';
+    const CRON_WATCH_HOOK = 'ai_alt_gpt_queue_watchdog';
     const CAPABILITY = 'manage_ai_alt_text';
 
     private $stats_cache = null;
@@ -25,6 +26,7 @@ class AI_Alt_Text_Generator_GPT {
 
     public function __construct() {
         register_activation_hook(__FILE__, [$this, 'activate']);
+        register_deactivation_hook(__FILE__, [$this, 'deactivate']);
 
         add_action('admin_menu', [$this, 'add_settings_page']);
         add_action('admin_init', [$this, 'register_settings']);
@@ -38,9 +40,11 @@ class AI_Alt_Text_Generator_GPT {
         add_action('rest_api_init', [$this, 'register_rest_routes']);
         add_action('admin_enqueue_scripts', [$this, 'enqueue_admin']);
         add_action(self::CRON_HOOK, [$this, 'process_queue']);
+        add_action(self::CRON_WATCH_HOOK, [$this, 'queue_watchdog']);
         add_action('admin_init', [$this, 'maybe_display_threshold_notice']);
         add_action('admin_post_ai_alt_usage_export', [$this, 'handle_usage_export']);
         add_action('init', [$this, 'ensure_capability']);
+        add_filter('cron_schedules', [$this, 'register_cron_schedules']);
 
         if (defined('WP_CLI') && WP_CLI) {
             \WP_CLI::add_command('ai-alt', [$this, 'wpcli_command']);
@@ -160,6 +164,7 @@ class AI_Alt_Text_Generator_GPT {
         }
 
         $messages = [];
+        $retries = intval($queue['retries'] ?? 0);
         foreach ($ids as $aid){
             $res = $this->generate_and_save($aid, 'queue');
             if (!is_wp_error($res)){
@@ -179,7 +184,6 @@ class AI_Alt_Text_Generator_GPT {
                 $queue['errors'] = isset($queue['errors']) ? $queue['errors'] + 1 : 1;
                 $messages[] = sprintf('ID %d halted: API key missing.', $aid);
                 $this->append_queue_messages($queue, $messages);
-                $queue['last_run'] = current_time('mysql');
                 $this->save_queue([]);
                 $this->send_notification(
                     __('AI Alt Text queue halted (missing API key)', 'ai-alt-gpt'),
@@ -190,8 +194,15 @@ class AI_Alt_Text_Generator_GPT {
                 $queue['errors'] = isset($queue['errors']) ? $queue['errors'] + 1 : 1;
                 $detail = isset($data['body']['error']['message']) ? $data['body']['error']['message'] : $message;
                 $messages[] = sprintf('ID %d API error: %s', $aid, $detail);
+                if ($retries < 3){
+                    $queue['retries'] = $retries + 1;
+                    $queue['cursor'] = max(0, intval($queue['cursor'] ?? 0) - 1);
+                    $this->append_queue_messages($queue, $messages);
+                    $this->save_queue($queue);
+                    wp_schedule_single_event(time() + 5, self::CRON_HOOK);
+                    return;
+                }
                 $this->append_queue_messages($queue, $messages);
-                $queue['last_run'] = current_time('mysql');
                 $this->save_queue($queue);
                 $this->send_notification(
                     __('AI Alt Text queue halted (API error)', 'ai-alt-gpt'),
@@ -206,7 +217,6 @@ class AI_Alt_Text_Generator_GPT {
         }
 
         $this->append_queue_messages($queue, $messages);
-        $queue['last_run'] = current_time('mysql');
 
         $this->save_queue($queue);
 
@@ -264,15 +274,18 @@ class AI_Alt_Text_Generator_GPT {
         if ($role && !$role->has_cap(self::CAPABILITY)){
             $role->add_cap(self::CAPABILITY);
         }
+        if (!wp_next_scheduled(self::CRON_WATCH_HOOK)){
+            wp_schedule_event(time() + 60, 'ai_alt_gpt_minute', self::CRON_WATCH_HOOK);
+        }
     }
 
     private function append_queue_messages(array &$queue, array $messages){
         $messages = array_filter($messages);
-        if (empty($messages)){
-            return;
+        if (!empty($messages)){
+            $existing = (array)($queue['last_messages'] ?? []);
+            $queue['last_messages'] = array_slice(array_merge($messages, $existing), 0, 5);
         }
-        $existing = (array)($queue['last_messages'] ?? []);
-        $queue['last_messages'] = array_slice(array_merge($messages, $existing), 0, 5);
+        $queue['last_run'] = current_time('mysql');
     }
 
     public function maybe_display_threshold_notice(){
@@ -295,6 +308,32 @@ class AI_Alt_Text_Generator_GPT {
         $limit = number_format_i18n($this->token_notice['limit'] ?? 0);
         echo '<div class="notice notice-warning is-dismissible"><p>' . esc_html(sprintf(__('AI Alt Text Generator has used %1$s tokens (threshold %2$s). Consider reviewing usage.', 'ai-alt-gpt'), $total, $limit)) . '</p></div>';
         $this->token_notice = null;
+    }
+
+    public function register_cron_schedules($schedules){
+        if (!isset($schedules['ai_alt_gpt_minute'])){
+            $schedules['ai_alt_gpt_minute'] = [
+                'interval' => 60,
+                'display'  => __('Every Minute (AI ALT)', 'ai-alt-gpt'),
+            ];
+        }
+        return $schedules;
+    }
+
+    public function deactivate(){
+        wp_clear_scheduled_hook(self::CRON_HOOK);
+        wp_clear_scheduled_hook(self::CRON_WATCH_HOOK);
+    }
+
+    public function queue_watchdog(){
+        $queue = $this->get_queue();
+        if (empty($queue) || empty($queue['active'])){
+            return;
+        }
+        $last_run = !empty($queue['last_run']) ? strtotime($queue['last_run']) : 0;
+        if (!$last_run || (time() - $last_run) >= 90){
+            $this->process_queue();
+        }
     }
 
     public function activate() {
@@ -321,6 +360,10 @@ class AI_Alt_Text_Generator_GPT {
         $role = get_role('administrator');
         if ($role && !$role->has_cap(self::CAPABILITY)){
             $role->add_cap(self::CAPABILITY);
+        }
+
+        if (!wp_next_scheduled(self::CRON_WATCH_HOOK)){
+            wp_schedule_event(time() + 60, 'ai_alt_gpt_minute', self::CRON_WATCH_HOOK);
         }
     }
 
@@ -385,6 +428,7 @@ class AI_Alt_Text_Generator_GPT {
         $tabs = [
             'dashboard' => __('Dashboard', 'ai-alt-gpt'),
             'usage'     => __('Usage & Reports', 'ai-alt-gpt'),
+            'library'   => __('ALT Library', 'ai-alt-gpt'),
             'settings'  => __('Settings', 'ai-alt-gpt'),
         ];
         $export_url = wp_nonce_url(admin_url('admin-post.php?action=ai_alt_usage_export'), 'ai_alt_usage_export');
@@ -403,7 +447,22 @@ class AI_Alt_Text_Generator_GPT {
             </h2>
 
             <?php if ($tab === 'dashboard') : ?>
-            <?php $queue_active = !empty($stats['queue']['active']); ?>
+            <?php
+                $queue_active = !empty($stats['queue']['active']);
+                $queue_scope_label = $stats['queue']['scope_label'] ?? '';
+                $queue_batch = isset($stats['queue']['batch']) ? number_format_i18n(intval($stats['queue']['batch'])) : '';
+                $queue_processed = isset($stats['queue']['processed']) ? number_format_i18n(intval($stats['queue']['processed'])) : '';
+                $queue_errors = isset($stats['queue']['errors']) ? number_format_i18n(intval($stats['queue']['errors'])) : '';
+                $queue_last_run = $stats['queue']['last_run_formatted'] ?? '';
+                $queue_next_run = $stats['queue']['next_run'] ?? '';
+                $coverage_numeric = max(0, min(100, floatval($stats['coverage'])));
+                $coverage_decimals = $coverage_numeric === floor($coverage_numeric) ? 0 : 1;
+                $coverage_display = number_format_i18n($coverage_numeric, $coverage_decimals);
+                /* translators: %s: Percentage value */
+                $coverage_text = $coverage_display . '%';
+                /* translators: %s: Percentage value */
+                $coverage_value_text = sprintf(__('ALT coverage at %s', 'ai-alt-gpt'), $coverage_text);
+            ?>
             <div class="ai-alt-dashboard ai-alt-dashboard--primary" data-stats='<?php echo esc_attr(wp_json_encode($stats)); ?>'>
                 <div class="ai-alt-dashboard__grid">
                     <div class="ai-alt-card">
@@ -434,15 +493,18 @@ class AI_Alt_Text_Generator_GPT {
                 </div>
 
                 <div class="ai-alt-dashboard__viz">
-                    <div class="ai-alt-progress">
-                        <div class="ai-alt-progress__bar">
-                            <span style="width: <?php echo esc_attr($stats['coverage']); ?>%"></span>
+                    <div class="ai-alt-progress" role="group" aria-labelledby="ai-alt-coverage-value">
+                        <div class="ai-alt-progress__bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="<?php echo esc_attr($coverage_numeric); ?>" aria-valuetext="<?php echo esc_attr($coverage_value_text); ?>" aria-describedby="ai-alt-coverage-summary">
+                            <span style="width: <?php echo esc_attr($coverage_numeric); ?>%" aria-hidden="true"></span>
                         </div>
-                        <p class="ai-alt-dashboard__coverage"><strong><?php echo esc_html($stats['coverage']); ?>%</strong> <?php esc_html_e('of images currently include ALT text.', 'ai-alt-gpt'); ?></p>
+                        <p id="ai-alt-coverage-summary" class="ai-alt-dashboard__coverage"><strong id="ai-alt-coverage-value"><?php echo esc_html($coverage_text); ?></strong> <?php esc_html_e('of images currently include ALT text.', 'ai-alt-gpt'); ?></p>
                     </div>
                     <div class="ai-alt-chart">
-                        <canvas id="ai-alt-coverage" width="220" height="220" aria-label="ALT coverage chart"></canvas>
-                        <div class="ai-alt-chart__legend">
+                        <figure class="ai-alt-chart__figure">
+                            <canvas id="ai-alt-coverage" width="220" height="220" aria-label="<?php esc_attr_e('Visual coverage chart', 'ai-alt-gpt'); ?>"></canvas>
+                            <figcaption class="screen-reader-text"><?php echo esc_html($coverage_value_text); ?></figcaption>
+                        </figure>
+                        <div class="ai-alt-chart__legend" aria-hidden="true">
                             <span class="ai-alt-chart__dot ai-alt-chart__dot--with"></span> <?php esc_html_e('With ALT', 'ai-alt-gpt'); ?>
                             <span class="ai-alt-chart__dot ai-alt-chart__dot--missing"></span> <?php esc_html_e('Missing', 'ai-alt-gpt'); ?>
                         </div>
@@ -456,11 +518,37 @@ class AI_Alt_Text_Generator_GPT {
                         <button type="button" class="button button-secondary ai-alt-stop-queue<?php echo $queue_active ? '' : ' is-hidden'; ?>" data-label-default="<?php esc_attr_e('Force Stop', 'ai-alt-gpt'); ?>" data-label-busy="<?php esc_attr_e('Stopping…', 'ai-alt-gpt'); ?>" <?php disabled(!$queue_active); ?>><?php esc_html_e('Force Stop', 'ai-alt-gpt'); ?></button>
                         <button type="button" class="button ai-alt-queue-run<?php echo $queue_active ? '' : ' is-hidden'; ?>" data-label-default="<?php esc_attr_e('Run Batch Now', 'ai-alt-gpt'); ?>" data-label-busy="<?php esc_attr_e('Running…', 'ai-alt-gpt'); ?>" <?php disabled(!$queue_active); ?>><?php esc_html_e('Run Batch Now', 'ai-alt-gpt'); ?></button>
                     </div>
-                    <div class="ai-alt-dashboard__status" aria-live="polite"></div>
+                    <div class="ai-alt-dashboard__status" role="status" aria-live="polite"></div>
                 </div>
 
-                <?php if (!empty($stats['queue']['active'])) : ?>
-                <div class="ai-alt-queue-log">
+                <div class="ai-alt-queue-summary<?php echo $queue_active ? '' : ' is-hidden'; ?>" aria-live="polite">
+                    <div class="ai-alt-queue-summary__item">
+                        <span class="ai-alt-queue-summary__label"><?php esc_html_e('Scope', 'ai-alt-gpt'); ?></span>
+                        <span class="ai-alt-queue-summary__value" data-queue-field="scope"><?php echo esc_html($queue_scope_label ?: __('N/A', 'ai-alt-gpt')); ?></span>
+                    </div>
+                    <div class="ai-alt-queue-summary__item">
+                        <span class="ai-alt-queue-summary__label"><?php esc_html_e('Batch size', 'ai-alt-gpt'); ?></span>
+                        <span class="ai-alt-queue-summary__value" data-queue-field="batch"><?php echo $queue_batch ? esc_html($queue_batch) : esc_html__('N/A', 'ai-alt-gpt'); ?></span>
+                    </div>
+                    <div class="ai-alt-queue-summary__item">
+                        <span class="ai-alt-queue-summary__label"><?php esc_html_e('Processed', 'ai-alt-gpt'); ?></span>
+                        <span class="ai-alt-queue-summary__value" data-queue-field="processed"><?php echo $queue_processed ? esc_html($queue_processed) : esc_html__('N/A', 'ai-alt-gpt'); ?></span>
+                    </div>
+                    <div class="ai-alt-queue-summary__item">
+                        <span class="ai-alt-queue-summary__label"><?php esc_html_e('Errors', 'ai-alt-gpt'); ?></span>
+                        <span class="ai-alt-queue-summary__value" data-queue-field="errors"><?php echo $queue_errors ? esc_html($queue_errors) : esc_html__('N/A', 'ai-alt-gpt'); ?></span>
+                    </div>
+                    <div class="ai-alt-queue-summary__item">
+                        <span class="ai-alt-queue-summary__label"><?php esc_html_e('Last run', 'ai-alt-gpt'); ?></span>
+                        <span class="ai-alt-queue-summary__value" data-queue-field="last_run"><?php echo $queue_last_run ? esc_html($queue_last_run) : esc_html__('Pending', 'ai-alt-gpt'); ?></span>
+                    </div>
+                    <div class="ai-alt-queue-summary__item">
+                        <span class="ai-alt-queue-summary__label"><?php esc_html_e('Next run', 'ai-alt-gpt'); ?></span>
+                        <span class="ai-alt-queue-summary__value" data-queue-field="next_run"><?php echo $queue_next_run ? esc_html($queue_next_run) : esc_html__('Waiting for cron', 'ai-alt-gpt'); ?></span>
+                    </div>
+                </div>
+
+                <div class="ai-alt-queue-log<?php echo $queue_active ? '' : ' is-hidden'; ?>" data-queue-log="true">
                     <h4><?php esc_html_e('Recent Queue Messages', 'ai-alt-gpt'); ?></h4>
                     <p class="description"><?php esc_html_e('Latest status for debugging slow or stalled queues.', 'ai-alt-gpt'); ?></p>
                     <ul>
@@ -471,7 +559,6 @@ class AI_Alt_Text_Generator_GPT {
                         <?php endif; ?>
                     </ul>
                 </div>
-                <?php endif; ?>
             </div>
             <?php elseif ($tab === 'usage') : ?>
             <?php $audit_rows = $stats['audit'] ?? []; $export_url = wp_nonce_url(admin_url('admin-post.php?action=ai_alt_usage_export'), 'ai_alt_usage_export'); ?>
@@ -503,16 +590,16 @@ class AI_Alt_Text_Generator_GPT {
                         <h3><?php esc_html_e('Usage Audit', 'ai-alt-gpt'); ?></h3>
                         <a href="<?php echo esc_url($export_url); ?>" class="button button-secondary ai-alt-export"><?php esc_html_e('Download CSV', 'ai-alt-gpt'); ?></a>
                     </div>
-                    <table class="ai-alt-audit__table" role="presentation">
+                    <table class="ai-alt-audit__table">
                         <thead>
                             <tr>
-                                <th><?php esc_html_e('Attachment', 'ai-alt-gpt'); ?></th>
-                                <th><?php esc_html_e('ALT Text', 'ai-alt-gpt'); ?></th>
-                                <th><?php esc_html_e('Source', 'ai-alt-gpt'); ?></th>
-                                <th><?php esc_html_e('Tokens', 'ai-alt-gpt'); ?></th>
-                                <th><?php esc_html_e('Prompt', 'ai-alt-gpt'); ?></th>
-                                <th><?php esc_html_e('Completion', 'ai-alt-gpt'); ?></th>
-                                <th><?php esc_html_e('Last Generated', 'ai-alt-gpt'); ?></th>
+                                <th scope="col"><?php esc_html_e('Attachment', 'ai-alt-gpt'); ?></th>
+                                <th scope="col"><?php esc_html_e('ALT Text', 'ai-alt-gpt'); ?></th>
+                                <th scope="col"><?php esc_html_e('Source', 'ai-alt-gpt'); ?></th>
+                                <th scope="col"><?php esc_html_e('Tokens', 'ai-alt-gpt'); ?></th>
+                                <th scope="col"><?php esc_html_e('Prompt', 'ai-alt-gpt'); ?></th>
+                                <th scope="col"><?php esc_html_e('Completion', 'ai-alt-gpt'); ?></th>
+                                <th scope="col"><?php esc_html_e('Last Generated', 'ai-alt-gpt'); ?></th>
                             </tr>
                         </thead>
                         <tbody class="ai-alt-audit-rows">
@@ -540,6 +627,116 @@ class AI_Alt_Text_Generator_GPT {
                         </tbody>
                     </table>
                 </div>
+            </div>
+            <?php elseif ($tab === 'library') : ?>
+            <?php
+            $per_page = max(5, min(200, intval($_GET['per_page'] ?? 50)));
+            $page_num = max(1, intval($_GET['paged'] ?? 1));
+            $offset   = ($page_num - 1) * $per_page;
+            $search   = isset($_GET['s']) ? sanitize_text_field($_GET['s']) : '';
+
+            $args = [
+                'post_type'      => 'attachment',
+                'post_status'    => 'inherit',
+                'post_mime_type' => 'image',
+                'posts_per_page' => $per_page,
+                'offset'         => $offset,
+                'orderby'        => 'ID',
+                'order'          => 'DESC',
+                'fields'         => 'ids',
+            ];
+
+            if ($search){
+                $args['s'] = $search;
+            }
+
+            $query = new \WP_Query($args);
+            $ids   = $query->posts;
+            $total_posts = intval($query->found_posts);
+            $total_pages = $per_page > 0 ? ceil($total_posts / $per_page) : 1;
+            ?>
+            <div class="ai-alt-library">
+                <form class="ai-alt-library__filters" method="get">
+                    <input type="hidden" name="page" value="ai-alt-gpt" />
+                    <input type="hidden" name="tab" value="library" />
+                    <label for="ai-alt-search" class="screen-reader-text"><?php esc_html_e('Search ALT text', 'ai-alt-gpt'); ?></label>
+                    <input type="search" id="ai-alt-search" name="s" value="<?php echo esc_attr($search); ?>" placeholder="<?php esc_attr_e('Search media title or ALT text…', 'ai-alt-gpt'); ?>" />
+                    <label for="ai-alt-per-page" class="screen-reader-text"><?php esc_html_e('Items per page', 'ai-alt-gpt'); ?></label>
+                    <select name="per_page" id="ai-alt-per-page">
+                        <?php foreach ([25, 50, 100, 200] as $option) : ?>
+                            <option value="<?php echo esc_attr($option); ?>" <?php selected($per_page, $option); ?>><?php echo esc_html(sprintf(__('%d per page', 'ai-alt-gpt'), $option)); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                    <button type="submit" class="button"><?php esc_html_e('Filter', 'ai-alt-gpt'); ?></button>
+                </form>
+
+                <table class="ai-alt-library__table">
+                    <thead>
+                        <tr>
+                            <th scope="col"><?php esc_html_e('Attachment', 'ai-alt-gpt'); ?></th>
+                            <th scope="col"><?php esc_html_e('ALT Text', 'ai-alt-gpt'); ?></th>
+                            <th scope="col"><?php esc_html_e('Source', 'ai-alt-gpt'); ?></th>
+                            <th scope="col"><?php esc_html_e('Tokens', 'ai-alt-gpt'); ?></th>
+                            <th scope="col"><?php esc_html_e('Last Generated', 'ai-alt-gpt'); ?></th>
+                            <th scope="col"><?php esc_html_e('Actions', 'ai-alt-gpt'); ?></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php if ($ids) : ?>
+                            <?php foreach ($ids as $attachment_id) :
+                                $alt   = get_post_meta($attachment_id, '_wp_attachment_image_alt', true);
+                                $alt   = $alt ? $alt : __('(empty)', 'ai-alt-gpt');
+                                $title = get_the_title($attachment_id);
+                                $src   = get_post_meta($attachment_id, '_ai_alt_source', true);
+                                $tokens = intval(get_post_meta($attachment_id, '_ai_alt_tokens_total', true));
+                                $generated = get_post_meta($attachment_id, '_ai_alt_generated_at', true);
+                                $generated = $generated ? mysql2date(get_option('date_format') . ' ' . get_option('time_format'), $generated) : __('Never', 'ai-alt-gpt');
+                                $edit_link = get_edit_post_link($attachment_id);
+                                $view_link = wp_get_attachment_url($attachment_id);
+                                ?>
+                                <tr>
+                                    <td>
+                                        <div class="ai-alt-library__attachment">
+                                            <a href="<?php echo esc_url($edit_link); ?>">
+                                                <?php echo esc_html($title ?: sprintf(__('Attachment #%d', 'ai-alt-gpt'), $attachment_id)); ?>
+                                            </a>
+                                            <div class="ai-alt-library__meta">
+                                                <code>#<?php echo esc_html($attachment_id); ?></code>
+                                                <?php if ($view_link) : ?>
+                                                    · <a href="<?php echo esc_url($view_link); ?>" target="_blank" rel="noopener noreferrer"><?php esc_html_e('View', 'ai-alt-gpt'); ?></a>
+                                                <?php endif; ?>
+                                            </div>
+                                        </div>
+                                    </td>
+                                    <td class="ai-alt-library__alt"><?php echo esc_html($alt); ?></td>
+                                    <td><span class="ai-alt-badge ai-alt-badge--<?php echo esc_attr($src ?: 'unknown'); ?>"><?php echo esc_html($src ?: __('Unknown', 'ai-alt-gpt')); ?></span></td>
+                                    <td class="ai-alt-library__tokens"><?php echo esc_html(number_format_i18n($tokens)); ?></td>
+                                    <td><?php echo esc_html($generated); ?></td>
+                                    <td>
+                                        <button type="button" class="button button-small ai-alt-regenerate-single" data-id="<?php echo esc_attr($attachment_id); ?>"><?php esc_html_e('Regenerate', 'ai-alt-gpt'); ?></button>
+                                    </td>
+                                </tr>
+                            <?php endforeach; ?>
+                        <?php else : ?>
+                            <tr><td colspan="6" class="ai-alt-library__empty"><?php esc_html_e('No attachments found matching your criteria.', 'ai-alt-gpt'); ?></td></tr>
+                        <?php endif; ?>
+                    </tbody>
+                </table>
+
+                <?php if ($total_pages > 1) : ?>
+                    <div class="ai-alt-library__pagination">
+                        <?php
+                        echo paginate_links([
+                            'base'      => add_query_arg(['tab' => 'library', 'per_page' => $per_page, 's' => $search, 'paged' => '%#%']),
+                            'format'    => '',
+                            'current'   => $page_num,
+                            'total'     => $total_pages,
+                            'prev_text' => __('« Previous', 'ai-alt-gpt'),
+                            'next_text' => __('Next »', 'ai-alt-gpt'),
+                        ]);
+                        ?>
+                    </div>
+                <?php endif; ?>
             </div>
             <?php else : ?>
             <form method="post" action="options.php" class="ai-alt-settings">
@@ -711,6 +908,21 @@ class AI_Alt_Text_Generator_GPT {
 
         $queue = $this->get_queue();
         $next_queue_run = $queue ? wp_next_scheduled(self::CRON_HOOK) : null;
+        $queue_scope_label = '';
+        if (!empty($queue['scope'])){
+            switch ($queue['scope']){
+                case 'all':
+                    $queue_scope_label = __('All images', 'ai-alt-gpt');
+                    break;
+                case 'missing':
+                    $queue_scope_label = __('Missing ALT only', 'ai-alt-gpt');
+                    break;
+                default:
+                    $queue_scope_label = ucwords(str_replace(['_', '-'], ' ', (string) $queue['scope']));
+            }
+        }
+        $queue_started_formatted = !empty($queue['started_at']) ? mysql2date(get_option('date_format') . ' ' . get_option('time_format'), $queue['started_at']) : null;
+        $queue_last_run_formatted = !empty($queue['last_run']) ? mysql2date(get_option('date_format') . ' ' . get_option('time_format'), $queue['last_run']) : null;
 
         $this->stats_cache = [
             'total'     => $total,
@@ -730,9 +942,12 @@ class AI_Alt_Text_Generator_GPT {
                 'attempted' => intval($queue['attempted'] ?? 0),
                 'cursor'    => intval($queue['cursor'] ?? 0),
                 'started_at'=> $queue['started_at'] ?? null,
+                'started_at_formatted' => $queue_started_formatted,
                 'next_run'  => $next_queue_run ? date_i18n(get_option('date_format') . ' ' . get_option('time_format'), $next_queue_run) : null,
                 'timestamp' => $next_queue_run,
                 'last_run'  => $queue['last_run'] ?? null,
+                'last_run_formatted' => $queue_last_run_formatted,
+                'scope_label' => $queue_scope_label,
                 'last_messages' => $queue['last_messages'] ?? [],
             ],
             'audit' => $this->get_usage_rows(10),
@@ -1253,6 +1468,8 @@ class AI_Alt_Text_Generator_GPT {
                     'runBatch'        => __('Run Batch Now', 'ai-alt-gpt'),
                     'runBatchBusy'    => __('Running…', 'ai-alt-gpt'),
                     'runBatchMessage' => __('Batch processed via dashboard trigger.', 'ai-alt-gpt'),
+                    'autoRetry'       => __('No progress detected. Attempting automatic retry…', 'ai-alt-gpt'),
+                    'noMessages'      => __('No queue messages recorded yet.', 'ai-alt-gpt'),
                     'noAudit'         => __('No usage data recorded yet.', 'ai-alt-gpt'),
                 ],
                 'labels'      => [
@@ -1263,6 +1480,7 @@ class AI_Alt_Text_Generator_GPT {
                     'allRunning'     => __('Regenerating…', 'ai-alt-gpt'),
                     'queueRunning'   => __('Processing…', 'ai-alt-gpt'),
                 ],
+                'autoRetryInterval' => 60000,
             ]);
         }
     }

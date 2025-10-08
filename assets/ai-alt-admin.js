@@ -86,22 +86,10 @@
         }
     }
 
-    $(document).on('click', '.ai-alt-generate', function(e){
-        e.preventDefault();
+    function regenerate(id, btn){
         if (!window.AI_ALT_GPT || !AI_ALT_GPT.rest){
             pushNotice('error', 'AI ALT: REST URL missing.');
             return;
-        }
-
-        var btn = $(this);
-        var id = btn.data('id');
-        if (!id){
-            pushNotice('error', 'AI ALT: Attachment ID missing.');
-            return;
-        }
-
-        if (typeof btn.data('original-text') === 'undefined'){
-            btn.data('original-text', btn.text());
         }
 
         btn.text('Generating…');
@@ -132,8 +120,35 @@
             var message = json.message || (json.data && json.data.message) || 'Error communicating';
             pushNotice('error', message);
         }).always(function(){
-            restoreButton(btn);
+            btn.text(btn.data('original-text') || 'Generate Alt').prop('disabled', false);
         });
+    }
+
+    $(document).on('click', '.ai-alt-generate', function(e){
+        e.preventDefault();
+
+        var btn = $(this);
+        var id = btn.data('id');
+        if (!id){
+            pushNotice('error', 'AI ALT: Attachment ID missing.');
+            return;
+        }
+
+        if (typeof btn.data('original-text') === 'undefined'){
+            btn.data('original-text', btn.text());
+        }
+
+        regenerate(id, btn);
+    });
+
+    $(document).on('click', '.ai-alt-regenerate-single', function(){
+        var btn = $(this);
+        var id = btn.data('id');
+        if (!id){ return; }
+        if (typeof btn.data('original-text') === 'undefined'){
+            btn.data('original-text', btn.text());
+        }
+        regenerate(id, btn.text('Regenerating…').prop('disabled', true));
     });
 
     function toggleLanguageCustom(){

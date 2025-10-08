@@ -2,6 +2,18 @@
 
 Automatically generate concise, accessible alternative text for WordPress media items using the OpenAI API. The plugin adds smart defaults, media library integrations, REST + WP-CLI support, and a configurable settings screen so editors can keep images compliant without manual busywork.
 
+## Quick Start
+1. Install/activate the plugin in `wp-content/plugins/ai-alt-gpt`.
+2. Visit **Media → AI Alt Text (GPT)**, paste your OpenAI API key, and hit **Save Settings**.
+3. Toggle “Generate on upload” (and optionally “Overwrite existing ALT text”) to automate new media.
+4. Use **Generate ALT for Missing Images** to backfill your library, or queue everything via **Regenerate ALT for All Images**.
+5. Monitor the dashboard cards/queue summary to confirm coverage growth and token usage.
+
+## Why this plugin?
+- **Editorial guardrails**: keep content compliant without forcing writers to learn prompt engineering.
+- **Production-friendly**: queue watchdogs, usage alerts, and bulk actions match real newsroom workflows.
+- **Extensible foundation**: REST, WP-CLI, and filters make it easy to wire into bespoke review flows.
+
 ## Features
 - Generate alt text automatically on image upload (optional overwrite of existing text).
 - Bulk action inside the Media Library list view (`Generate Alt Text (AI)`).
@@ -42,6 +54,17 @@ Automatically generate concise, accessible alternative text for WordPress media 
 - `ai_alt_gpt_model` — adjust the model before requests are sent.
 - `ai_alt_gpt_prompt` — customize the prompt builder with additional context.
 
+```php
+add_filter('ai_alt_gpt_model', function($model){
+    return defined('WP_DEBUG') && WP_DEBUG ? 'gpt-4o-mini' : 'gpt-4.1-mini';
+});
+
+add_filter('ai_alt_gpt_prompt', function($prompt, $attachment_id){
+    $keywords = get_post_meta($attachment_id, '_seo_focus_keywords', true);
+    return $keywords ? "Focus on: {$keywords}\n\n" . $prompt : $prompt;
+}, 10, 2);
+```
+
 ## Usage
 - **Upload Flow**: When enabled, new image attachments automatically trigger an alt text request.
 - **Media Library**: Select images and choose `Generate Alt Text (AI)` from bulk actions. Individual items gain a `Generate Alt Text (AI)` link.
@@ -51,10 +74,34 @@ Automatically generate concise, accessible alternative text for WordPress media 
 - **Usage Audit / Export**: Review the "Usage Audit" table on the dashboard to see top token consumers, and download the full CSV report for finance/SEO review.
 - **Dry Run Mode**: Toggle dry run in settings to capture prompts and counts without altering media—perfect for QA.
 
+### Automation examples
+- **Nightly catch-up**: `wp ai-alt generate --all` from cron (wrap in `wp --path=/var/www/html` if running system cron).
+- **Missing-only sweep**:
+  ```bash
+  wp media list --fields=ID --format=ids \
+    --meta_key=_wp_attachment_image_alt --meta_compare='=' --meta_value='' \
+    | tr ' ' '\n' \
+    | while read id; do wp ai-alt generate --post_id="$id"; done
+  ```
+- **Watchdog ping**: Schedule `wp cron event run ai_alt_gpt_queue_watchdog` hourly to ensure WP-Cron keeps the queue alive on hosts with low traffic.
+
+## Operations & Limits
+- **Token & rate limits**: Large libraries can hit OpenAI rate ceilings. The dashboard queue runner pauses five seconds between retries and will requeue a batch up to three times before surfacing an error.
+- **Batch sizing**: Start with batches of 25–50; higher numbers multiply token spikes and increase the risk of timeouts on shared hosting.
+- **Queue watchdog**: The plugin schedules a minute-based cron event that checks for stuck jobs; ensure your host processes WP-Cron (or trigger via a real cron if WP-Cron is disabled).
+- **Background queues vs. manual**: Background mode lets you leave the page, but manual “Run Batch Now” remains for immediate bursts when you’re monitoring results live.
+- **Costs**: Track token totals in the Usage tab and set an alert threshold to receive email notices before budgets are exceeded.
+
 All successful generations store the alt text, the source (`auto`, `bulk`, `ajax`, `wpcli`, `dashboard`, `queue`, `dry-run`), the model used, token usage, and a timestamp as attachment meta for auditing. Site-wide token totals and request counts appear on the Usage tab for quick cost checks, and threshold/queue alerts help avoid runaway spend.
 
 ## Error Handling
 If the OpenAI request fails, the operation surfaces a `WP_Error` with context (status/body). Bulk and CLI commands log failures while continuing to process remaining images.
+
+## Troubleshooting
+- **No ALT text generated**: Confirm the API key is valid and the selected model is available to your account; dry-run mode will intentionally skip writes.
+- **Queue appears stuck**: Check the queue summary for last/next run timestamps. If they’re stale, trigger **Run Batch Now** or run `wp cron event run ai_alt_gpt_process_queue` to resume.
+- **Rate-limit errors**: Reduce the batch size in settings and re-run. Persistent `429` responses usually clear within a minute.
+- **Capability denied**: Grant trusted roles the `manage_ai_alt_text` capability, or fall back to `manage_options` if only administrators should access the dashboard.
 
 ## Development
 - Code is intentionally lightweight and documented inline for easy customization.
