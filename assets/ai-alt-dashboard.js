@@ -106,6 +106,50 @@
         elements.status.text(message || '').toggleClass('is-active', !!active);
     }
 
+    function updateCoverageUI(stats){
+        if (!$dashboard.length){ return; }
+
+        const $coverageHint = $dashboard.find('.ai-alt-card__hint').eq(1);
+        const $coverageValue = $dashboard.find('#ai-alt-coverage-value');
+        const $coverageSummary = $dashboard.find('#ai-alt-coverage-summary');
+
+        const raw = Number(stats.coverage || 0);
+        const limited = Math.max(0, Math.min(100, raw));
+        const display = limited.toFixed(1).replace(/\.0$/, '');
+        const percent = display + '%';
+        const valueText = (l10n.coverageValue || 'ALT coverage at %s').replace('%s', percent);
+
+        if ($coverageHint.length){
+            $coverageHint.text(percent + ' ' + (l10n.coverageSuffix || 'coverage'));
+        }
+
+        if ($coverageValue.length){
+            $coverageValue.text(percent);
+        } else {
+            const $fallbackStrong = $dashboard.find('.ai-alt-dashboard__coverage strong').first();
+            if ($fallbackStrong.length){
+                $fallbackStrong.text(percent);
+            }
+        }
+
+        if ($coverageSummary.length){
+            $coverageSummary.attr('data-coverage', percent);
+        }
+
+        if (elements.bar.length){
+            elements.bar.css('width', limited + '%');
+        }
+
+        if (elements.progressWrap && elements.progressWrap.length){
+            elements.progressWrap.attr({
+                'aria-valuenow': limited.toFixed(1),
+                'aria-valuetext': valueText
+            });
+        }
+
+        return { valueText, limited };
+    }
+
     function clearPoll(){
         if (pollTimer){
             clearTimeout(pollTimer);
@@ -375,30 +419,7 @@
             values.eq(3).text(fmtNumber(stats.generated || 0));
             $dashboard.find('.ai-alt-card__value--tokens').text(fmtNumber((stats.usage && stats.usage.total) || 0));
 
-            const coverageNumberRaw = Number(stats.coverage || 0);
-            const coverageNumber = Math.max(0, Math.min(100, coverageNumberRaw));
-            const coverageDisplay = coverageNumber.toFixed(1).replace(/\.0$/, '');
-            const coveragePercent = coverageDisplay + '%';
-            const coverageValueText = (l10n.coverageValue || 'ALT coverage at %s').replace('%s', coveragePercent);
-
-            $dashboard.find('.ai-alt-card__hint').eq(1).text(coveragePercent + ' ' + (l10n.coverageSuffix || 'coverage'));
-
-            const $coverageSummary = $dashboard.find('#ai-alt-coverage-summary');
-            if ($coverageSummary.length){
-                $dashboard.find('#ai-alt-coverage-value').text(coveragePercent);
-            } else {
-                $dashboard.find('.ai-alt-dashboard__coverage strong').first().text(coveragePercent);
-            }
-
-            if (elements.bar.length){
-                elements.bar.css('width', coverageNumber + '%');
-            }
-            if (elements.progressWrap && elements.progressWrap.length){
-                elements.progressWrap.attr({
-                    'aria-valuenow': coverageNumber.toFixed(1),
-                    'aria-valuetext': coverageValueText
-                });
-            }
+            updateCoverageUI(stats);
             drawChart(stats);
         }
 

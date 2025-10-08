@@ -1,4 +1,8 @@
 (function($){
+    function createNoticeElement(type, message){
+        return $('<div class="notice notice-' + type + ' is-dismissible"><p>' + message + '</p></div>');
+    }
+
     function pushNotice(type, message){
         if (window.wp && wp.data && wp.data.dispatch){
             try {
@@ -6,7 +10,7 @@
                 return;
             } catch (err) {}
         }
-        var $notice = $('<div class="notice notice-' + type + ' is-dismissible"><p>' + message + '</p></div>');
+        var $notice = createNoticeElement(type, message);
         var $target = $('#wpbody-content').find('.wrap').first();
         if ($target.length){
             $target.prepend($notice);

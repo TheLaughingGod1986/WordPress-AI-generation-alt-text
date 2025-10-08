@@ -148,28 +148,30 @@ class AI_Alt_Text_Generator_GPT {
         $prevProcessed = intval($queue['processed'] ?? 0);
         $ids = [];
 
+        $cursorBase = intval($queue['cursor'] ?? 0);
         if ($queue['scope'] === 'all'){
-            $cursor = intval($queue['cursor'] ?? 0);
-            $ids = $this->get_all_attachment_ids($batch, $cursor);
-            $queue['cursor'] = $cursor + count($ids);
+            $ids = $this->get_all_attachment_ids($batch, $cursorBase);
         } else {
             $ids = $this->get_missing_attachment_ids($batch);
         }
 
         if (empty($ids)){
-            $this->append_queue_messages($queue, [__('Queue empty or attachments already processed.', 'ai-alt-gpt')]);
-            $queue['last_run'] = current_time('mysql');
-            $this->save_queue([]);
+            $this->queue_finish($queue, [__('Queue empty or attachments already processed.', 'ai-alt-gpt')]);
             return;
         }
 
         $messages = [];
         $retries = intval($queue['retries'] ?? 0);
-        foreach ($ids as $aid){
+        $processedThisBatch = 0;
+
+        foreach ($ids as $index => $aid){
+            $queue['attempted'] = isset($queue['attempted']) ? $queue['attempted'] + 1 : 1;
+
             $res = $this->generate_and_save($aid, 'queue');
             if (!is_wp_error($res)){
                 $queue['processed'] = isset($queue['processed']) ? $queue['processed'] + 1 : 1;
-                $queue['attempted'] = isset($queue['attempted']) ? $queue['attempted'] + 1 : 1;
+                $processedThisBatch++;
+                $queue['retries'] = 0;
                 continue;
             }
 
@@ -179,45 +181,68 @@ class AI_Alt_Text_Generator_GPT {
 
             if ($error_code === 'ai_alt_dry_run'){
                 $queue['processed'] = isset($queue['processed']) ? $queue['processed'] + 1 : 1;
+                $processedThisBatch++;
+                $queue['retries'] = 0;
                 $messages[] = sprintf('ID %d dry-run: %s', $aid, $message);
-            } elseif ($error_code === 'no_api_key'){
-                $queue['errors'] = isset($queue['errors']) ? $queue['errors'] + 1 : 1;
+                continue;
+            }
+
+            $queue['errors'] = isset($queue['errors']) ? $queue['errors'] + 1 : 1;
+
+            if ($error_code === 'no_api_key'){
                 $messages[] = sprintf('ID %d halted: API key missing.', $aid);
-                $this->append_queue_messages($queue, $messages);
-                $this->save_queue([]);
-                $this->send_notification(
-                    __('AI Alt Text queue halted (missing API key)', 'ai-alt-gpt'),
-                    __('The queue stopped because an API key is not configured.', 'ai-alt-gpt')
+                if ($queue['scope'] === 'all'){
+                    $queue['cursor'] = $cursorBase + $processedThisBatch;
+                }
+                $this->queue_finish(
+                    $queue,
+                    $messages,
+                    [
+                        'subject' => __('AI Alt Text queue halted (missing API key)', 'ai-alt-gpt'),
+                        'body'    => __('The queue stopped because an API key is not configured.', 'ai-alt-gpt'),
+                    ]
                 );
                 return;
-            } elseif ($error_code === 'api_error'){
-                $queue['errors'] = isset($queue['errors']) ? $queue['errors'] + 1 : 1;
+            }
+
+            if ($error_code === 'api_error'){
                 $detail = isset($data['body']['error']['message']) ? $data['body']['error']['message'] : $message;
                 $messages[] = sprintf('ID %d API error: %s', $aid, $detail);
+
                 if ($retries < 3){
                     $queue['retries'] = $retries + 1;
-                    $queue['cursor'] = max(0, intval($queue['cursor'] ?? 0) - 1);
-                    $this->append_queue_messages($queue, $messages);
-                    $this->save_queue($queue);
-                    wp_schedule_single_event(time() + 5, self::CRON_HOOK);
+                    if ($queue['scope'] === 'all'){
+                        $queue['cursor'] = $cursorBase + $processedThisBatch;
+                    }
+                    $delay = max(5, 5 * $queue['retries']);
+                    $this->queue_reschedule($queue, $messages, $delay);
                     return;
                 }
-                $this->append_queue_messages($queue, $messages);
-                $this->save_queue($queue);
-                $this->send_notification(
-                    __('AI Alt Text queue halted (API error)', 'ai-alt-gpt'),
-                    sprintf(__('Processing stopped due to an API error on attachment %1$d: %2$s', 'ai-alt-gpt'), $aid, $detail)
+
+                if ($queue['scope'] === 'all'){
+                    $queue['cursor'] = $cursorBase + $processedThisBatch;
+                }
+                $this->queue_finish(
+                    $queue,
+                    $messages,
+                    [
+                        'subject' => __('AI Alt Text queue halted (API error)', 'ai-alt-gpt'),
+                        'body'    => sprintf(__('Processing stopped due to an API error on attachment %1$d: %2$s', 'ai-alt-gpt'), $aid, $detail),
+                    ]
                 );
                 return;
-            } else {
-                $queue['errors'] = isset($queue['errors']) ? $queue['errors'] + 1 : 1;
-                $messages[] = sprintf('ID %d error: %s', $aid, $message);
             }
-            $queue['attempted'] = isset($queue['attempted']) ? $queue['attempted'] + 1 : 1;
+
+            $messages[] = sprintf('ID %d error: %s', $aid, $message);
         }
 
-        $this->append_queue_messages($queue, $messages);
+        if ($queue['scope'] === 'all'){
+            $queue['cursor'] = $cursorBase + count($ids);
+        }
 
+        $queue['retries'] = 0;
+
+        $this->append_queue_messages($queue, $messages);
         $this->save_queue($queue);
 
         $stats = $this->get_media_stats();
@@ -232,11 +257,14 @@ class AI_Alt_Text_Generator_GPT {
         $processedThisRun = intval($queue['processed'] ?? 0) - $prevProcessed;
         if (!$done && $processedThisRun === 0 && $errorsThisRun >= count($ids)){
             // Avoid infinite loops when every attempt fails.
-            $this->send_notification(
-                __('AI Alt Text queue halted', 'ai-alt-gpt'),
-                __('Background queue stopped because all attempts in the last batch failed. Please review logs or regenerate manually.', 'ai-alt-gpt')
+            $this->queue_finish(
+                $queue,
+                [__('Queue halted after repeated errors in the last batch.', 'ai-alt-gpt')],
+                [
+                    'subject' => __('AI Alt Text queue halted', 'ai-alt-gpt'),
+                    'body'    => __('Background queue stopped because all attempts in the last batch failed. Please review logs or regenerate manually.', 'ai-alt-gpt'),
+                ]
             );
-            $this->save_queue([]);
             return;
         }
 
@@ -252,7 +280,7 @@ class AI_Alt_Text_Generator_GPT {
                     )
                 );
             }
-            $this->save_queue([]);
+            $this->queue_finish($queue);
             return;
         }
 
@@ -286,6 +314,22 @@ class AI_Alt_Text_Generator_GPT {
             $queue['last_messages'] = array_slice(array_merge($messages, $existing), 0, 5);
         }
         $queue['last_run'] = current_time('mysql');
+    }
+
+    private function queue_finish(array &$queue, array $messages = [], array $notification = []){
+        $this->append_queue_messages($queue, $messages);
+        $this->save_queue([]);
+
+        if (!empty($notification['subject']) && !empty($notification['body'])){
+            $this->send_notification($notification['subject'], $notification['body']);
+        }
+    }
+
+    private function queue_reschedule(array &$queue, array $messages = [], int $delay = 5){
+        $delay = max(1, $delay);
+        $this->append_queue_messages($queue, $messages);
+        $this->save_queue($queue);
+        wp_schedule_single_event(time() + $delay, self::CRON_HOOK);
     }
 
     public function maybe_display_threshold_notice(){
