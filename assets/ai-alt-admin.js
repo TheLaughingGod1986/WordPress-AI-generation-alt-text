@@ -1,4 +1,43 @@
-( function($){
+(function($){
+    function pushNotice(type, message){
+        if (window.wp && wp.data && wp.data.dispatch){
+            try {
+                wp.data.dispatch('core/notices').createNotice(type, message, { isDismissible: true });
+                return;
+            } catch (err) {}
+        }
+        var $notice = $('<div class="notice notice-' + type + ' is-dismissible"><p>' + message + '</p></div>');
+        var $target = $('#wpbody-content').find('.wrap').first();
+        if ($target.length){
+            $target.prepend($notice);
+        } else {
+            $('#wpbody-content').prepend($notice);
+        }
+    }
+
+    function refreshDashboardStats(){
+        if (!window.AI_ALT_GPT || !AI_ALT_GPT.restStats || !window.fetch){
+            return;
+        }
+        fetch(AI_ALT_GPT.restStats, {
+            credentials: 'same-origin',
+            headers: {
+                'X-WP-Nonce': AI_ALT_GPT.nonce,
+                'Accept': 'application/json'
+            }
+        })
+        .then(function(res){ return res.ok ? res.json() : null; })
+        .then(function(data){
+            if (!data){ return; }
+            if (typeof window.dispatchEvent === 'function'){
+                try {
+                    window.dispatchEvent(new CustomEvent('ai-alt-stats-update', { detail: data }));
+                } catch (err) {}
+            }
+        })
+        .catch(function(){});
+    }
+
     function restoreButton(btn){
         var original = btn.data('original-text');
         if (typeof original !== 'undefined') {
@@ -50,14 +89,14 @@
     $(document).on('click', '.ai-alt-generate', function(e){
         e.preventDefault();
         if (!window.AI_ALT_GPT || !AI_ALT_GPT.rest){
-            alert('AI ALT: REST URL missing.');
+            pushNotice('error', 'AI ALT: REST URL missing.');
             return;
         }
 
         var btn = $(this);
         var id = btn.data('id');
         if (!id){
-            alert('AI ALT: Attachment ID missing.');
+            pushNotice('error', 'AI ALT: Attachment ID missing.');
             return;
         }
 
@@ -78,23 +117,44 @@
             if (r && r.alt){
                 var context = btn.closest('.compat-item, .attachment-details, .media-modal');
                 updateAltField(id, r.alt, context.length ? context : null);
-
-                if (context.length){
-                    alert('ALT: ' + r.alt);
-                } else {
-                    alert('ALT: ' + r.alt);
-                    location.reload();
-                }
+                pushNotice('success', 'ALT generated: ' + r.alt);
+                refreshDashboardStats();
+                if (!context.length){ location.reload(); }
+            } else if (r && r.code === 'ai_alt_dry_run'){
+                pushNotice('info', r.message || 'Dry run enabled. Prompt stored for review.');
+                refreshDashboardStats();
             } else {
                 var message = (r && (r.message || (r.data && r.data.message))) || 'Failed to generate ALT';
-                alert('AI ALT: ' + message);
+                pushNotice('error', message);
             }
         }).fail(function(xhr){
             var json = xhr.responseJSON || {};
             var message = json.message || (json.data && json.data.message) || 'Error communicating';
-            alert('AI ALT: ' + message);
+            pushNotice('error', message);
         }).always(function(){
             restoreButton(btn);
         });
+    });
+
+    function toggleLanguageCustom(){
+        var select = $('.ai-alt-language-select');
+        if (!select.length){ return; }
+        select.each(function(){
+            var $sel = $(this);
+            var $custom = $sel.closest('td').find('.ai-alt-language-custom');
+            var val = $sel.val();
+            if (!$custom.length){ return; }
+            if (val === 'custom'){
+                $custom.show();
+            } else {
+                $custom.hide();
+            }
+        });
+    }
+
+    $(document).on('change', '.ai-alt-language-select', toggleLanguageCustom);
+
+    $(document).ready(function(){
+        toggleLanguageCustom();
     });
 })(jQuery);
