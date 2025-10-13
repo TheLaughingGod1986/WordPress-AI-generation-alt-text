@@ -998,6 +998,11 @@ body.media_page_ai-alt-gpt {
     background: rgba(37, 99, 235, 0.08);
 }
 
+.ai-alt-library__row--missing {
+    background: rgba(249, 115, 22, 0.08);
+    box-shadow: inset 0 0 0 1px rgba(249, 115, 22, 0.25);
+}
+
 .ai-alt-library__alt {
     line-height: 1.5;
     color: var(--ai-alt-text);

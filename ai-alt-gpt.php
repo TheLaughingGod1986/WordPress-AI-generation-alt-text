@@ -499,32 +499,52 @@ class AI_Alt_Text_Generator_GPT {
                     <tbody>
                         <?php if ($ids) : ?>
                             <?php foreach ($ids as $attachment_id) :
-                                $alt   = get_post_meta($attachment_id, '_wp_attachment_image_alt', true);
-                                $alt   = $alt ? $alt : __('(empty)', 'ai-alt-gpt');
-                                $title = get_the_title($attachment_id);
-                                $src   = get_post_meta($attachment_id, '_ai_alt_source', true);
-                                $tokens = intval(get_post_meta($attachment_id, '_ai_alt_tokens_total', true));
-                                $generated = get_post_meta($attachment_id, '_ai_alt_generated_at', true);
-                                $generated = $generated ? mysql2date(get_option('date_format') . ' ' . get_option('time_format'), $generated) : __('Never', 'ai-alt-gpt');
+                                $raw_alt = trim(get_post_meta($attachment_id, '_wp_attachment_image_alt', true));
+                                $alt     = $raw_alt !== '' ? $raw_alt : __('(empty)', 'ai-alt-gpt');
+                                $title   = get_the_title($attachment_id);
+                                $src_key = sanitize_key(get_post_meta($attachment_id, '_ai_alt_source', true) ?: 'unknown');
+                                $src_label = $this->format_source_label($src_key);
+                                $tokens  = intval(get_post_meta($attachment_id, '_ai_alt_tokens_total', true));
+                                $generated_raw = get_post_meta($attachment_id, '_ai_alt_generated_at', true);
+                                $generated = $generated_raw ? mysql2date(get_option('date_format') . ' ' . get_option('time_format'), $generated_raw) : __('Never', 'ai-alt-gpt');
                                 $edit_link = get_edit_post_link($attachment_id);
                                 $view_link = add_query_arg('item', $attachment_id, admin_url('upload.php')) . '#attachment_alt';
+                                $thumb     = wp_get_attachment_image_src($attachment_id, 'thumbnail');
+
+                                $is_missing = $raw_alt === '';
+                                $is_recent  = $generated_raw ? ( time() - strtotime($generated_raw) ) <= apply_filters('ai_alt_gpt_recent_highlight_window', 30 * MINUTE_IN_SECONDS ) : false;
+                                $row_classes = [];
+                                if ($is_recent) {
+                                    $row_classes[] = 'ai-alt-library__row--recent';
+                                }
+                                if ($is_missing) {
+                                    $row_classes[] = 'ai-alt-library__row--missing';
+                                }
+                                $row_class_attr = $row_classes ? ' class="' . esc_attr(implode(' ', $row_classes)) . '"' : '';
                                 ?>
-                                <tr>
+                                <tr<?php echo $row_class_attr; ?> data-id="<?php echo esc_attr($attachment_id); ?>">
                                     <td>
                                         <div class="ai-alt-library__attachment">
-                                            <a href="<?php echo esc_url($edit_link); ?>">
-                                                <?php echo esc_html($title ?: sprintf(__('Attachment #%d', 'ai-alt-gpt'), $attachment_id)); ?>
-                                            </a>
+                                            <?php if ($thumb) : ?>
+                                                <a href="<?php echo esc_url($view_link); ?>" class="ai-alt-library__thumb" aria-hidden="true"><img src="<?php echo esc_url($thumb[0]); ?>" alt="" loading="lazy" /></a>
+                                            <?php endif; ?>
+                                            <div class="ai-alt-library__details">
+                                                <a href="<?php echo esc_url($edit_link); ?>">
+                                                    <?php echo esc_html($title ?: sprintf(__('Attachment #%d', 'ai-alt-gpt'), $attachment_id)); ?>
+                                                </a>
                                             <div class="ai-alt-library__meta">
                                                 <code>#<?php echo esc_html($attachment_id); ?></code>
                                                     <?php if ($view_link) : ?>
                                                         · <a href="<?php echo esc_url($view_link); ?>" class="ai-alt-library__details-link"><?php esc_html_e('View', 'ai-alt-gpt'); ?></a>
                                                 <?php endif; ?>
+                                                <?php if ($is_recent) : ?>
+                                                    · <span class="ai-alt-library__recent-badge"><?php esc_html_e('New', 'ai-alt-gpt'); ?></span>
+                                                <?php endif; ?>
                                             </div>
                                         </div>
                                     </td>
                                     <td class="ai-alt-library__alt"><?php echo esc_html($alt); ?></td>
-                                    <td><span class="ai-alt-badge ai-alt-badge--<?php echo esc_attr($src ?: 'unknown'); ?>"><?php echo esc_html($src ?: __('Unknown', 'ai-alt-gpt')); ?></span></td>
+                                    <td><span class="ai-alt-badge ai-alt-badge--<?php echo esc_attr($src_key); ?>" title="<?php echo esc_attr($this->format_source_description($src_key)); ?>"><?php echo esc_html($src_label); ?></span></td>
                                     <td class="ai-alt-library__tokens"><?php echo esc_html(number_format_i18n($tokens)); ?></td>
                                     <td><?php echo esc_html($generated); ?></td>
                                     <td>
