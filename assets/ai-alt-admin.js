@@ -44,9 +44,8 @@
 
     function restoreButton(btn){
         var original = btn.data('original-text');
-        if (typeof original !== 'undefined') {
-            btn.text(original);
-        }
+        var fallback = typeof original !== 'undefined' ? original : 'Generate Alt';
+        btn.text(fallback);
         if (btn.is('button, input')) {
             btn.prop('disabled', false);
         }
@@ -90,9 +89,42 @@
         }
     }
 
+    function resolveConfig(){
+        if (window.AI_ALT_GPT && AI_ALT_GPT.rest){
+            return {
+                rest: AI_ALT_GPT.rest,
+                nonce: AI_ALT_GPT.nonce || (window.wpApiSettings ? wpApiSettings.nonce : '')
+            };
+        }
+
+        if (window.AI_ALT_GPT_DASH && AI_ALT_GPT_DASH.rest){
+            return {
+                rest: AI_ALT_GPT_DASH.rest,
+                nonce: AI_ALT_GPT_DASH.nonce || (window.wpApiSettings ? wpApiSettings.nonce : '')
+            };
+        }
+
+        if (window.wpApiSettings && wpApiSettings.root){
+            return {
+                rest: wpApiSettings.root + 'ai-alt/v1/generate/',
+                nonce: wpApiSettings.nonce
+            };
+        }
+
+        return null;
+    }
+
     function regenerate(id, btn){
-        if (!window.AI_ALT_GPT || !AI_ALT_GPT.rest){
+        var config = resolveConfig();
+        if (!config || !config.rest){
             pushNotice('error', 'AI ALT: REST URL missing.');
+            if (window.console){
+                console.warn('AI ALT: regenerate aborted because REST endpoint is missing.', {
+                    AI_ALT_GPT: window.AI_ALT_GPT,
+                    AI_ALT_GPT_DASH: window.AI_ALT_GPT_DASH,
+                    wpApiSettings: window.wpApiSettings
+                });
+            }
             return;
         }
 
@@ -102,14 +134,18 @@
         }
 
         $.ajax({
-            url: AI_ALT_GPT.rest + id,
+            url: config.rest + id,
             method: 'POST',
-            beforeSend: function(xhr){ xhr.setRequestHeader('X-WP-Nonce', AI_ALT_GPT.nonce); },
+            beforeSend: function(xhr){
+                if (config.nonce){
+                    xhr.setRequestHeader('X-WP-Nonce', config.nonce);
+                }
+            },
         }).done(function(r){
             if (r && r.alt){
                 var context = btn.closest('.compat-item, .attachment-details, .media-modal');
                 updateAltField(id, r.alt, context.length ? context : null);
-                pushNotice('success', 'ALT generated: ' + r.alt);
+                pushNotice('success', 'ALT generated: ' + r.alt + ' — ' + (AI_ALT_GPT && AI_ALT_GPT.l10n && AI_ALT_GPT.l10n.reviewCue ? AI_ALT_GPT.l10n.reviewCue : 'Review it in the ALT Library to confirm it matches the image.'));
                 refreshDashboardStats();
                 if (!context.length){ location.reload(); }
             } else if (r && r.code === 'ai_alt_dry_run'){
@@ -124,7 +160,7 @@
             var message = json.message || (json.data && json.data.message) || 'Error communicating';
             pushNotice('error', message);
         }).always(function(){
-            btn.text(btn.data('original-text') || 'Generate Alt').prop('disabled', false);
+            restoreButton(btn);
         });
     }
 
@@ -163,7 +199,9 @@
             var $custom = $sel.closest('td').find('.ai-alt-language-custom');
             var val = $sel.val();
             if (!$custom.length){ return; }
-            if (val === 'custom'){
+            var isCustom = val === 'custom';
+            $custom.toggleClass('is-visible', isCustom);
+            if (isCustom){
                 $custom.show();
             } else {
                 $custom.hide();
