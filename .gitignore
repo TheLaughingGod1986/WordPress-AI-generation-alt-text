@@ -1,3 +1,30 @@
+# Local WordPress environment (wp-env)
 .wp-env/
 .wp-env.json
+
+# OS-specific cruft
 .DS_Store
+Thumbs.db
+
+# Node / front-end build artifacts
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# PHP Composer vendor directory (if generated locally)
+vendor/
+
+# IDE / Editor directories
+.idea/
+.vscode/
+*.code-workspace
+
+# Logs and temporary files
+*.log
+*.tmp
+
+# Build outputs
+/dist/
+/build/
