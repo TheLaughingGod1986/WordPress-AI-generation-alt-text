@@ -266,6 +266,20 @@ class AI_Alt_Text_Generator_GPT {
                         echo wp_kses_post($intro_text);
                     ?></p>
                 </div>
+                <div class="ai-alt-dashboard__microcards">
+                    <div class="ai-alt-microcard">
+                        <span class="ai-alt-microcard__label"><?php esc_html_e('Last regenerated', 'ai-alt-gpt'); ?></span>
+                        <strong class="ai-alt-microcard__value"><?php echo esc_html($stats['latest_generated'] ?: __('No generations yet', 'ai-alt-gpt')); ?></strong>
+                    </div>
+                    <div class="ai-alt-microcard">
+                        <span class="ai-alt-microcard__label"><?php esc_html_e('Top source (all time)', 'ai-alt-gpt'); ?></span>
+                        <strong class="ai-alt-microcard__value"><?php echo $stats['top_source_key'] ? esc_html($this->format_source_label($stats['top_source_key'])) . ' · ' . esc_html(number_format_i18n($stats['top_source_count'])) : esc_html__('No data yet', 'ai-alt-gpt'); ?></strong>
+                    </div>
+                    <div class="ai-alt-microcard">
+                        <span class="ai-alt-microcard__label"><?php esc_html_e('Dry run mode', 'ai-alt-gpt'); ?></span>
+                        <strong class="ai-alt-microcard__value ai-alt-microcard__value--status <?php echo $stats['dry_run_enabled'] ? 'is-on' : 'is-off'; ?>"><?php echo $stats['dry_run_enabled'] ? esc_html__('ON', 'ai-alt-gpt') : esc_html__('OFF', 'ai-alt-gpt'); ?></strong>
+                    </div>
+                </div>
                 <div class="ai-alt-dashboard__grid">
                     <div class="ai-alt-card">
                         <span class="ai-alt-card__label"><?php esc_html_e('Images', 'ai-alt-gpt'); ?></span>
@@ -385,7 +399,7 @@ class AI_Alt_Text_Generator_GPT {
                                             </div>
                                         </td>
                                         <td class="ai-alt-audit__alt"><?php echo esc_html($row['alt']); ?></td>
-                                        <td class="ai-alt-audit__source"><span class="ai-alt-badge ai-alt-badge--<?php echo esc_attr($row['source'] ?: 'unknown'); ?>"><?php echo esc_html($row['source'] ?: __('Unknown', 'ai-alt-gpt')); ?></span></td>
+                                        <td class="ai-alt-audit__source"><span class="ai-alt-badge ai-alt-badge--<?php echo esc_attr($row['source'] ?: 'unknown'); ?>" title="<?php echo esc_attr($row['source_description']); ?>"><?php echo esc_html($row['source_label']); ?></span></td>
                                         <td class="ai-alt-audit__tokens"><?php echo esc_html(number_format_i18n($row['tokens'])); ?></td>
                                         <td><?php echo esc_html(number_format_i18n($row['prompt'])); ?></td>
                                         <td><?php echo esc_html(number_format_i18n($row['completion'])); ?></td>
@@ -543,7 +557,12 @@ class AI_Alt_Text_Generator_GPT {
                                             </div>
                                         </div>
                                     </td>
-                                    <td class="ai-alt-library__alt"><?php echo esc_html($alt); ?></td>
+                                    <td class="ai-alt-library__alt">
+                                        <?php echo esc_html($alt); ?>
+                                        <?php if ($is_missing) : ?>
+                                            <span class="ai-alt-library__flag"><?php esc_html_e('Needs ALT review', 'ai-alt-gpt'); ?></span>
+                                        <?php endif; ?>
+                                    </td>
                                     <td><span class="ai-alt-badge ai-alt-badge--<?php echo esc_attr($src_key); ?>" title="<?php echo esc_attr($this->format_source_description($src_key)); ?>"><?php echo esc_html($src_label); ?></span></td>
                                     <td class="ai-alt-library__tokens"><?php echo esc_html(number_format_i18n($tokens)); ?></td>
                                     <td><?php echo esc_html($generated); ?></td>
@@ -753,6 +772,23 @@ class AI_Alt_Text_Generator_GPT {
             $usage['last_request_formatted'] = mysql2date(get_option('date_format') . ' ' . get_option('time_format'), $usage['last_request']);
         }
 
+        $latest_generated_raw = $wpdb->get_var(
+            "SELECT meta_value FROM {$wpdb->postmeta} WHERE meta_key = '_ai_alt_generated_at' ORDER BY meta_value DESC LIMIT 1"
+        );
+        $latest_generated = $latest_generated_raw ? mysql2date(get_option('date_format') . ' ' . get_option('time_format'), $latest_generated_raw) : '';
+
+        $top_source_row = $wpdb->get_row(
+            "SELECT meta_value AS source, COUNT(*) AS count
+             FROM {$wpdb->postmeta}
+             WHERE meta_key = '_ai_alt_source' AND meta_value <> ''
+             GROUP BY meta_value
+             ORDER BY COUNT(*) DESC
+             LIMIT 1",
+            ARRAY_A
+        );
+        $top_source_key = sanitize_key($top_source_row['source'] ?? '');
+        $top_source_count = intval($top_source_row['count'] ?? 0);
+
         $this->stats_cache = [
             'total'     => $total,
             'with_alt'  => $with_alt,
@@ -761,23 +797,11 @@ class AI_Alt_Text_Generator_GPT {
             'coverage'  => $coverage,
             'usage'     => $usage,
             'token_limit' => intval($opts['token_limit'] ?? 0),
-            'queue' => [
-                'active'    => false,
-                'scope'     => '',
-                'batch'     => 0,
-                'processed' => 0,
-                'errors'    => 0,
-                'attempted' => 0,
-                'cursor'    => 0,
-                'started_at'=> null,
-                'started_at_formatted' => null,
-                'next_run'  => null,
-                'timestamp' => null,
-                'last_run'  => null,
-                'last_run_formatted' => null,
-                'scope_label' => '',
-                'last_messages' => [],
-            ],
+            'latest_generated' => $latest_generated,
+            'latest_generated_raw' => $latest_generated_raw,
+            'top_source_key' => $top_source_key,
+            'top_source_count' => $top_source_count,
+            'dry_run_enabled' => !empty($opts['dry_run']),
             'audit' => $this->get_usage_rows(10),
         ];
 
@@ -877,6 +901,8 @@ class AI_Alt_Text_Generator_GPT {
                 'prompt'     => intval($row['tokens_prompt'] ?? 0),
                 'completion' => intval($row['tokens_completion'] ?? 0),
                 'source'     => $source,
+                'source_label' => $this->format_source_label($source),
+                'source_description' => $this->format_source_description($source),
                 'model'      => $row['model'] ?? '',
                 'generated'  => $generated,
                 'thumb'      => $thumb ? $thumb[0] : '',
@@ -884,6 +910,51 @@ class AI_Alt_Text_Generator_GPT {
                 'view_url'   => get_attachment_link($row['ID']),
             ];
         }, $rows);
+    }
+
+    private function get_source_meta_map(){
+        return [
+            'auto'     => [
+                'label' => __('Auto (upload)', 'ai-alt-gpt'),
+                'description' => __('Generated automatically when the image was uploaded.', 'ai-alt-gpt'),
+            ],
+            'ajax'     => [
+                'label' => __('Media Library (single)', 'ai-alt-gpt'),
+                'description' => __('Triggered from the Media Library row action or attachment details screen.', 'ai-alt-gpt'),
+            ],
+            'bulk'     => [
+                'label' => __('Media Library (bulk)', 'ai-alt-gpt'),
+                'description' => __('Generated via the Media Library bulk action.', 'ai-alt-gpt'),
+            ],
+            'dashboard' => [
+                'label' => __('Dashboard quick actions', 'ai-alt-gpt'),
+                'description' => __('Generated from the dashboard buttons.', 'ai-alt-gpt'),
+            ],
+            'wpcli'    => [
+                'label' => __('WP-CLI', 'ai-alt-gpt'),
+                'description' => __('Generated via the wp ai-alt CLI command.', 'ai-alt-gpt'),
+            ],
+            'manual'   => [
+                'label' => __('Manual / custom', 'ai-alt-gpt'),
+                'description' => __('Generated by custom code or integration.', 'ai-alt-gpt'),
+            ],
+            'unknown'  => [
+                'label' => __('Unknown', 'ai-alt-gpt'),
+                'description' => __('Source not recorded for this ALT text.', 'ai-alt-gpt'),
+            ],
+        ];
+    }
+
+    private function format_source_label($key){
+        $map = $this->get_source_meta_map();
+        $key = sanitize_key($key ?: 'unknown');
+        return $map[$key]['label'] ?? $map['unknown']['label'];
+    }
+
+    private function format_source_description($key){
+        $map = $this->get_source_meta_map();
+        $key = sanitize_key($key ?: 'unknown');
+        return $map[$key]['description'] ?? $map['unknown']['description'];
     }
 
     public function handle_usage_export(){
@@ -967,11 +1038,31 @@ class AI_Alt_Text_Generator_GPT {
             return new \WP_Error('ai_alt_dry_run', __('Dry run enabled. Prompt stored for review; ALT text not updated.', 'ai-alt-gpt'), ['prompt' => $prompt]);
         }
 
+        $include_image = apply_filters('ai_alt_gpt_include_image_url', true, $attachment_id, $opts);
+        $image_url = '';
+        if ($include_image){
+            $image_url = wp_get_attachment_url($attachment_id);
+        }
+
+        $user_content = [
+            [
+                'type' => 'text',
+                'text' => $prompt,
+            ],
+        ];
+
+        if ($image_url){
+            $user_content[] = [
+                'type' => 'image_url',
+                'image_url' => [ 'url' => $image_url ],
+            ];
+        }
+
         $body = [
             'model' => $model,
             'messages' => [
                 ['role' => 'system', 'content' => 'You write short, descriptive, accessible image ALT text.'],
-                ['role' => 'user',   'content' => $prompt],
+                ['role' => 'user',   'content' => $user_content],
             ],
             'temperature' => 0.3,
             'max_tokens'  => 80,
@@ -1050,7 +1141,11 @@ class AI_Alt_Text_Generator_GPT {
 
     public function row_action_link($actions, $post){
         if ($post->post_type === 'attachment' && $this->is_image($post->ID)){
-            $actions['ai_alt_generate_single'] = '<a href="#" class="ai-alt-generate" data-id="' . intval($post->ID) . '">Generate Alt Text (AI)</a>';
+            $has_alt = (bool) get_post_meta($post->ID, '_wp_attachment_image_alt', true);
+            $generate_label   = __('Generate Alt Text (AI)', 'ai-alt-gpt');
+            $regenerate_label = __('Regenerate Alt Text (AI)', 'ai-alt-gpt');
+            $text = $has_alt ? $regenerate_label : $generate_label;
+            $actions['ai_alt_generate_single'] = '<a href="#" class="ai-alt-generate" data-id="' . intval($post->ID) . '" data-has-alt="' . ($has_alt ? '1' : '0') . '" data-label-generate="' . esc_attr($generate_label) . '" data-label-regenerate="' . esc_attr($regenerate_label) . '">' . esc_html($text) . '</a>';
         }
         return $actions;
     }
@@ -1060,10 +1155,17 @@ class AI_Alt_Text_Generator_GPT {
             return $fields;
         }
 
+        $has_alt = (bool) get_post_meta($post->ID, '_wp_attachment_image_alt', true);
+        $label_generate   = __('Generate Alt', 'ai-alt-gpt');
+        $label_regenerate = __('Regenerate Alt', 'ai-alt-gpt');
+        $current_label    = $has_alt ? $label_regenerate : $label_generate;
         $button = sprintf(
-            '<button type="button" class="button ai-alt-generate" data-id="%1$d">%2$s</button>',
+            '<button type="button" class="button ai-alt-generate" data-id="%1$d" data-has-alt="%2$d" data-label-generate="%3$s" data-label-regenerate="%4$s">%5$s</button>',
             intval($post->ID),
-            esc_html__('Generate Alt', 'ai-alt-gpt')
+            $has_alt ? 1 : 0,
+            esc_attr($label_generate),
+            esc_attr($label_regenerate),
+            esc_html($current_label)
         );
 
         $fields['ai_alt_generate'] = [

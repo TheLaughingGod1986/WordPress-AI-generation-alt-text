@@ -44,7 +44,12 @@
 
     function restoreButton(btn){
         var original = btn.data('original-text');
-        var fallback = typeof original !== 'undefined' ? original : 'Generate Alt';
+        var fallback;
+        if (btn.is('a')){
+            fallback = btn.data('label-regenerate') || btn.data('label-generate') || btn.text() || 'Regenerate Alt Text (AI)';
+        } else {
+            fallback = typeof original !== 'undefined' ? original : (btn.data('label-generate') || 'Generate Alt');
+        }
         btn.text(fallback);
         if (btn.is('button, input')) {
             btn.prop('disabled', false);
@@ -148,6 +153,14 @@
                 pushNotice('success', 'ALT generated: ' + r.alt + ' — ' + (AI_ALT_GPT && AI_ALT_GPT.l10n && AI_ALT_GPT.l10n.reviewCue ? AI_ALT_GPT.l10n.reviewCue : 'Review it in the ALT Library to confirm it matches the image.'));
                 refreshDashboardStats();
                 if (!context.length){ location.reload(); }
+                btn.attr('data-has-alt', '1');
+                if (btn.is('a')){
+                    btn.text(btn.data('label-regenerate') || 'Regenerate Alt Text (AI)');
+                } else {
+                    var regenLabel = btn.data('label-regenerate') || 'Regenerate Alt';
+                    btn.data('original-text', regenLabel);
+                    btn.text(regenLabel);
+                }
             } else if (r && r.code === 'ai_alt_dry_run'){
                 pushNotice('info', r.message || 'Dry run enabled. Prompt stored for review.');
                 refreshDashboardStats();
@@ -176,6 +189,14 @@
 
         if (typeof btn.data('original-text') === 'undefined'){
             btn.data('original-text', btn.text());
+        }
+
+        if (btn.data('has-alt')){
+            if (btn.is('a')){
+                btn.text(btn.data('label-regenerate') || btn.text());
+            } else {
+                btn.text(btn.data('label-regenerate') || btn.data('original-text') || 'Regenerate Alt');
+            }
         }
 
         regenerate(id, btn);
