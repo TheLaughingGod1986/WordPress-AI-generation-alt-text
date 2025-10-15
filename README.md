@@ -1,106 +1,216 @@
-# AI Alt Text Generator (GPT)
+# Farlo AI Alt Text Generator (GPT)
 
-Automatically generate concise, accessible alternative text for WordPress media items using the OpenAI API. The plugin adds smart defaults, media library integrations, REST + WP-CLI support, and a configurable settings screen so editors can keep images compliant without manual busywork.
-
-## Quick Start
-1. Install/activate the plugin in `wp-content/plugins/ai-alt-gpt`.
-2. Visit **Media → AI Alt Text (GPT)**, paste your OpenAI API key, and hit **Save Settings**.
-3. Toggle “Generate on upload” (and optionally “Overwrite existing ALT text”) to automate new media.
-4. Use the per-image **Generate Alt** button (row action or attachment sidebar) to refresh any existing images.
-5. Monitor the dashboard coverage cards and the “Recently Generated” panel to confirm progress, and review token usage on the Usage tab. Use the one-click “Generate ALT for Missing Images” button for a supervised pass that processes each item sequentially.
-
-## Why this plugin?
-- **Editorial guardrails**: keep content compliant without forcing writers to learn prompt engineering.
-- **Production-friendly**: usage alerts, Media Library bulk actions, and REST/CLI access fit real editorial workflows.
-- **Extensible foundation**: REST, WP-CLI, and filters make it easy to wire into bespoke review flows.
+Automatically generate concise, accessible ALT text for your WordPress images using OpenAI's GPT models. Improve accessibility and SEO with AI-powered image descriptions.
 
 ## Features
-- Generate alt text automatically on image upload (optional overwrite of existing text).
-- Bulk action inside the Media Library list view (`Generate Alt Text (AI)`).
-- Per-image row action that calls a localized REST endpoint for instant results.
-- WordPress REST route for on-demand generation (`POST /wp-json/ai-alt/v1/generate/<id>`), now including the image itself so GPT can describe actual visual content.
-- WP-CLI command `wp ai-alt generate --post_id=<id>` for scripted workflows.
-- Settings page under **Media → AI Alt Text (GPT)** with a polished dashboard: coverage cards, progress bar, donut chart, per-image quick actions, plus a “Recently Generated” gallery with thumbnails.
-- Usage tab with API counters, threshold alerts, downloadable CSV audit, and per-attachment token totals.
-- Token usage tracking with configurable alert threshold, dry-run mode for auditing prompts, and downloadable CSV for finance/SEO reviews.
-- Language presets (defaults to English UK; US/custom locales available), tone control, and overwrite toggles.
-- Custom capability `manage_ai_alt_text` so you can delegate access without granting full `manage_options`.
-- Extensible via filters like `ai_alt_gpt_model` and `ai_alt_gpt_prompt`.
 
-## Requirements
-- WordPress 6.0+ (tested with latest core).
-- PHP 7.4+.
-- OpenAI API key with access to the chosen model (default `gpt-4o-mini`).
+### 🤖 Intelligent ALT Text Generation
+- **Automatic on Upload** - Generate ALT text when images are uploaded
+- **Bulk Processing** - Handle multiple images at once via Media Library
+- **Manual Control** - Generate or regenerate for individual images
+- **Smart Context** - Uses image filename, title, caption, and parent post for better descriptions
+
+### 📊 Comprehensive Dashboard
+- **Coverage Tracking** - Visual charts showing ALT text coverage across your media library
+- **Usage Metrics** - Monitor API requests, token usage, and generation history
+- **Quality Scoring** - Automated QA review of generated descriptions
+- **ALT Library** - Review, filter, and manage all your ALT text in one place
+
+### 🎨 Modern Interface
+- **Intuitive Design** - Clean, professional interface with accessibility features
+- **Real-time Updates** - Live progress tracking for batch operations
+- **Interactive Charts** - Visual coverage indicators and statistics
+- **Mobile Responsive** - Works seamlessly on all devices
+
+### 🔧 Developer-Friendly
+- **REST API** - Integrate ALT generation into your workflows
+- **WP-CLI Support** - Command-line tools for bulk operations
+- **Hooks & Filters** - Customize prompts and behavior
+- **Dry Run Mode** - Test configurations without updating images
+
+### ⚙️ Flexible Configuration
+- **Model Selection** - Choose between gpt-4o-mini, gpt-4o, or gpt-4.1-mini
+- **Language Support** - Generate ALT text in any language
+- **Tone Control** - Set the writing style (professional, friendly, concise, etc.)
+- **Word Limit** - Control description length (recommended: 8-16 words)
+- **Custom Prompts** - Add your own instructions to every generation
+
+### 📈 Usage Controls
+- **Token Alerts** - Get notified when approaching usage limits
+- **Usage Audit** - Detailed CSV export of all API usage
+- **Source Tracking** - Know how each ALT text was generated (auto, bulk, manual, etc.)
+- **Recent Activity** - View and regenerate recently processed images
 
 ## Installation
-1. Clone or download this repository into `wp-content/plugins/ai-alt-gpt`.
-2. Ensure the plugin files live at:
-   - `wp-content/plugins/ai-alt-gpt/ai-alt-gpt.php`
-   - `wp-content/plugins/ai-alt-gpt/assets/ai-alt-admin.js`
-   - `wp-content/plugins/ai-alt-gpt/assets/ai-alt-dashboard.js`
-   - `wp-content/plugins/ai-alt-gpt/assets/ai-alt-dashboard.css`
-3. Activate **AI Alt Text Generator (GPT)** from the WordPress Plugins admin page.
+
+1. Upload the plugin files to `/wp-content/plugins/ai-alt-gpt/`
+2. Activate the plugin through the 'Plugins' menu in WordPress
+3. Navigate to **Media → AI ALT Text** to configure your OpenAI API key
+4. Start generating accessible ALT text!
 
 ## Configuration
-1. Navigate to **Media → AI Alt Text (GPT)**.
-2. Enter your OpenAI API key and preferred model (e.g., `gpt-4o-mini`, `gpt-4o`, `gpt-4.1-mini`).
-3. Choose a language preset (defaults to English UK; switch to **English (US)** or **Custom…** for other locales).
-4. Configure tone, max words, upload behaviour, optional dry-run mode, and the token alert threshold (set to `0` to disable alerts). Specify a notification email for token events if different from the site admin.
-5. Save the settings. They are stored in the `ai_alt_gpt_settings` option.
-6. Grant additional roles the `manage_ai_alt_text` capability if they should access the dashboard without full admin rights.
 
-### Filters
-- `ai_alt_gpt_model` — adjust the model before requests are sent.
-- `ai_alt_gpt_prompt` — customize the prompt builder with additional context.
+### Getting Started
 
-```php
-add_filter('ai_alt_gpt_model', function($model){
-    return defined('WP_DEBUG') && WP_DEBUG ? 'gpt-4o-mini' : 'gpt-4.1-mini';
-});
+1. **Obtain an OpenAI API Key**
+   - Visit [OpenAI Platform](https://platform.openai.com/api-keys)
+   - Create a new API key
+   - Copy the key (you won't be able to see it again)
 
-add_filter('ai_alt_gpt_prompt', function($prompt, $attachment_id){
-    $keywords = get_post_meta($attachment_id, '_seo_focus_keywords', true);
-    return $keywords ? "Focus on: {$keywords}\n\n" . $prompt : $prompt;
-}, 10, 2);
-```
+2. **Configure the Plugin**
+   - Go to **Media → AI ALT Text → Settings**
+   - Paste your API key
+   - Select your preferred model (gpt-4o-mini recommended for best cost/quality balance)
+   - Set language and tone preferences
+   - Save settings
+
+3. **Generate ALT Text**
+   - **Automatic**: Enable "Generate on upload" in settings
+   - **Bulk**: Select images in Media Library → Bulk Actions → "Generate Alt Text (AI)"
+   - **Individual**: Click "Generate Alt Text (AI)" on any image
+   - **Dashboard**: Use quick actions to process missing or all images
 
 ## Usage
-- **Upload Flow**: When enabled, new image attachments automatically trigger an alt text request.
-- **Media Library**: Select images and choose `Generate Alt Text (AI)` from bulk actions. Individual items gain a `Generate Alt Text (AI)` link.
-- **Dashboard Overview**: Use the coverage cards and audit table on **Media → AI Alt Text (GPT)** to spot gaps, then open each attachment (or use the row action) to refresh its ALT text.
-- **REST API**: Send a `POST` request to `/wp-json/ai-alt/v1/generate/<attachment_id>` with a valid nonce (`X-WP-Nonce`) from an authorized user.
-- **WP-CLI**: Run `wp ai-alt generate --post_id=123` for a specific attachment.
-- **Usage Audit / Export**: Review the "Usage Audit" table on the dashboard to see top token consumers, and download the full CSV report for finance/SEO review.
-- **Dry Run Mode**: Toggle dry run in settings to capture prompts and counts without altering media—perfect for QA.
 
-### Automation examples
-- **Missing-only sweep**:
-  ```bash
-  wp media list --fields=ID --format=ids \
-    --meta_key=_wp_attachment_image_alt --meta_compare='=' --meta_value='' \
-    | tr ' ' '\n' \
-    | while read id; do wp ai-alt generate --post_id="$id"; done
-  ```
+### Dashboard Quick Actions
 
-## Operations & Limits
-- **Token & rate limits**: Large libraries can hit OpenAI rate ceilings. Spread manual requests over time or run smaller CLI loops to stay within limits.
-- **Manual cadence**: Because generation now happens per attachment, plan review sessions (or scripted loops) that mirror your editorial workflow instead of long unattended batches.
-- **Costs**: Track token totals in the Usage tab and set an alert threshold to receive email notices before budgets are exceeded.
+Access the dashboard at **Media → AI ALT Text**:
 
-All successful generations store the alt text, the source (`auto`, `bulk`, `ajax`, `wpcli`, `dashboard`, `dry-run`), the model used, token usage, and a timestamp as attachment meta for auditing. Site-wide token totals and request counts appear on the Usage tab for quick cost checks, and threshold alerts help avoid runaway spend.
+- **Generate ALT for Missing Images** - Processes only images without ALT text
+- **Regenerate ALT for All Images** - Processes entire media library (use with caution)
+- **View Coverage** - Visual chart showing your ALT text coverage percentage
+- **Recent Activity** - See recently generated ALT text with regenerate options
 
-## Error Handling
-If the OpenAI request fails, the operation surfaces a `WP_Error` with context (status/body). Bulk and CLI commands log failures while continuing to process remaining images.
+### ALT Library
 
-## Troubleshooting
-- **No ALT text generated**: Confirm the API key is valid and the selected model is available to your account; dry-run mode will intentionally skip writes.
-- **Rate-limit errors**: Pause between manual regenerations or throttle CLI loops. Persistent `429` responses usually clear within a minute.
-- **Capability denied**: Grant trusted roles the `manage_ai_alt_text` capability, or fall back to `manage_options` if only administrators should access the dashboard.
+Review and manage all generated ALT text:
 
-## Development
-- Code is intentionally lightweight and documented inline for easy customization.
-- JavaScript enhancements live in `assets/ai-alt-admin.js`; an inline fallback script ensures row actions work even if enqueued assets are blocked.
-- Contributions welcome via pull request.
+- **Filter by Quality** - Show healthy, needs review, or critical entries
+- **Search** - Find images by title or ALT text
+- **Quality Scores** - Automated QA ratings (0-100) with improvement suggestions
+- **One-Click Regenerate** - Instantly regenerate any description
+- **Bulk Actions** - Process multiple images at once
+
+### Media Library Integration
+
+- **Row Actions** - "Generate Alt Text (AI)" link on each image
+- **Bulk Actions** - Select multiple images and generate in one click
+- **Edit Modal** - Generate or regenerate from the attachment details screen
+
+### WP-CLI Commands
+
+```bash
+# Generate ALT for all images
+wp ai-alt generate --all
+
+# Generate only for missing ALT
+wp ai-alt generate --missing
+
+# Dry run (test without saving)
+wp ai-alt generate --all --dry-run
+
+# Get stats
+wp ai-alt stats
+```
+
+## Settings
+
+### OpenAI Connection
+- **API Key**: Your OpenAI API key
+- **Model**: gpt-4o-mini (recommended), gpt-4o, or gpt-4.1-mini
+
+### Generation Defaults
+- **Word Limit**: Target length (4-30 words, recommended: 8-16)
+- **Tone/Style**: Overall voice (e.g., "professional, accessible")
+- **Language**: en-GB, en, or custom (any language/locale)
+- **Custom Prompt**: Additional instructions prepended to every request
+
+### Automation
+- **Generate on Upload**: Automatically create ALT text for new images
+- **Overwrite Existing**: Replace existing ALT text when regenerating
+- **Dry Run Mode**: Log prompts without updating ALT text (for testing)
+
+### Alerts & Reporting
+- **Token Alert Threshold**: Get notified when usage exceeds this limit
+- **Alert Email**: Where to send notifications (defaults to admin email)
+
+## Best Practices
+
+### For Accessibility
+- Review generated ALT text before publishing
+- Keep descriptions concise (8-16 words ideal)
+- Describe what's visible, not what's implied
+- Avoid phrases like "image of" or "photo of"
+
+### For Quality
+- Use the ALT Library to review automated QA scores
+- Regenerate descriptions with low quality scores
+- Customize tone and prompts for your brand voice
+- Test settings in dry run mode first
+
+### For Cost Control
+- Use gpt-4o-mini for most use cases (excellent quality, low cost)
+- Set token alert thresholds
+- Monitor usage in the Usage & Reports tab
+- Enable "Generate on upload" only if needed
+
+## Privacy & Security
+
+- **API Key Storage**: Keys are stored in WordPress options table
+- **Data Transmission**: Only image metadata (filename, title, caption) sent to OpenAI
+- **No Image Upload**: Images themselves are never sent to OpenAI
+- **User Permissions**: Only administrators can manage settings by default
+- **Custom Capability**: `manage_ai_alt_text` for granular permission control
+
+## Requirements
+
+- **WordPress**: 5.8 or higher
+- **PHP**: 7.4 or higher
+- **OpenAI API Key**: Active account with available credits
+- **Permissions**: Administrator or custom `manage_ai_alt_text` capability
+
+## Frequently Asked Questions
+
+**Q: How much does it cost?**  
+A: Costs depend on OpenAI pricing. Using gpt-4o-mini, expect ~$0.001-0.003 per image. Monitor usage in the dashboard.
+
+**Q: Can I use this for existing images?**  
+A: Yes! Use bulk actions or the dashboard quick actions to process your entire media library.
+
+**Q: What if I don't like the generated ALT text?**  
+A: Simply click "Regenerate" for a different description, or manually edit the ALT text field.
+
+**Q: Is my OpenAI API key secure?**  
+A: Yes, it's stored in your WordPress database and only accessible to administrators.
+
+**Q: Can I generate ALT text in languages other than English?**  
+A: Absolutely! Set your preferred language in Settings (supports any language).
+
+**Q: Will this work with page builders?**  
+A: Yes, the plugin updates the standard WordPress ALT text field used by all themes and page builders.
+
+**Q: Can I customize the prompts?**  
+A: Yes, use the "Additional instructions" field in Settings to add custom requirements.
+
+## Support
+
+For support, feature requests, or bug reports:
+- **Documentation**: Review this README and in-app help text
+- **Dashboard**: Check the "How to Use" tab for guidance
+- **OpenAI Status**: Check [status.openai.com](https://status.openai.com) for API issues
+
+## Changelog
+
+See `CHANGELOG.md` for version history and updates.
 
 ## License
-GPL-2.0-or-later. See the GNU General Public License for more details.
+
+GPL-2.0-or-later
+
+## Credits
+
+Developed by **Farlo** with ❤️ for the WordPress community.
+
+---
+
+**Make your site more accessible, one image at a time.** 🌟

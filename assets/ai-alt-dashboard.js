@@ -1,5 +1,22 @@
+/**
+ * Farlo AI Alt Text Generator (GPT) - Dashboard
+ * 
+ * Handles dashboard functionality including stats, batch generation,
+ * usage tracking, ALT library, and interactive visualizations.
+ * 
+ * @package Farlo_AI_Alt_GPT
+ * @version 3.0.0
+ */
+
 (function($){
     const dash = window.AI_ALT_GPT_DASH || {};
+    const restEndpoints = {
+        generate: dash.rest || (window.AI_ALT_GPT && AI_ALT_GPT.rest) || '',
+        stats: dash.restStats || (window.AI_ALT_GPT && AI_ALT_GPT.restStats) || '',
+        missing: dash.restMissing || (window.AI_ALT_GPT && AI_ALT_GPT.restMissing) || '',
+        all: dash.restAll || (window.AI_ALT_GPT && AI_ALT_GPT.restAll) || ''
+    };
+    const nonce = dash.nonce || (window.AI_ALT_GPT && AI_ALT_GPT.nonce) || '';
     const $dashboard = $('.ai-alt-dashboard--primary');
     const $usage = $('.ai-alt-dashboard--usage');
 
@@ -15,13 +32,19 @@
         textMuted: '#50575e'
     };
 
+    const LOG_LIMIT = 12;
+
     const elements = {
         bar: $dashboard.find('.ai-alt-progress__bar span'),
         progressWrap: $dashboard.find('.ai-alt-progress__bar'),
         coverageHint: $dashboard.find('[data-coverage-hint]'),
         coverageValue: $dashboard.find('#ai-alt-coverage-value'),
         coverageSummary: $dashboard.find('#ai-alt-coverage-summary'),
+        coverageViz: $dashboard.find('[data-coverage-viz]'),
+        coverageBadge: $dashboard.find('[data-coverage-badge]'),
+        coverageLegend: $dashboard.find('[data-coverage-legend]'),
         auditBody: $dashboard.find('.ai-alt-audit-rows'),
+        progressLog: $dashboard.find('[data-progress-log]'),
         stats: {
             total: $dashboard.find('[data-stat="total"]'),
             withAlt: $dashboard.find('[data-stat="with-alt"]'),
@@ -46,6 +69,65 @@
 
     const canvas = $dashboard.length ? document.getElementById('ai-alt-coverage') : null;
     const ctx = canvas ? canvas.getContext('2d') : null;
+
+    function parseResponse(res){
+        const contentType = (res.headers && res.headers.get) ? (res.headers.get('content-type') || '') : '';
+        const isJson = contentType.indexOf('application/json') !== -1;
+        const reader = isJson ? res.json() : res.text();
+
+        return reader.then(function(payload){
+            if (!res.ok){
+                let errorPayload = payload;
+                if (!isJson){
+                    if (typeof payload === 'string' && payload.trim().length){
+                        try {
+                            errorPayload = JSON.parse(payload);
+                        } catch (e){
+                            errorPayload = { message: payload };
+                        }
+                    } else {
+                        errorPayload = { message: payload };
+                    }
+                }
+                if (typeof errorPayload === 'string'){
+                    errorPayload = { message: errorPayload };
+                }
+                if (errorPayload && typeof errorPayload === 'object'){
+                    if (!errorPayload.status){ errorPayload.status = res.status; }
+                    if (!errorPayload.statusText){ errorPayload.statusText = res.statusText; }
+                }
+                throw errorPayload;
+            }
+
+            if (!isJson && typeof payload === 'string'){ // fallback to JSON when text response actually JSON
+                try {
+                    return JSON.parse(payload);
+                } catch (err){
+                    return payload;
+                }
+            }
+
+            return payload;
+        }).catch(function(err){
+            if (!res.ok){
+                if (typeof err === 'string'){
+                    err = { message: err, status: res.status };
+                } else if (err && typeof err === 'object' && !err.status){
+                    err.status = res.status;
+                }
+                throw err;
+            }
+            throw err;
+        });
+    }
+
+    function formatErrorMessage(err){
+        const base = (err && (err.message || (err.data && err.data.message))) || (dash.l10n && dash.l10n.error) || 'Failed to generate ALT.';
+        if (err && err.status){
+            return base + ' (HTTP ' + err.status + ')';
+        }
+        return base;
+    }
 
     function fmtNumber(num){
         return (Number(num) || 0).toLocaleString();
@@ -111,6 +193,12 @@
         const total = Math.max(0, (stats.with_alt || 0) + (stats.missing || 0));
         const withAltFraction = total ? (stats.with_alt || 0) / total : 0;
         const missingFraction = 1 - withAltFraction;
+
+        const chartSize = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--ai-alt-chart-size')) || 220;
+        if (canvas.width !== chartSize || canvas.height !== chartSize) {
+            canvas.width = chartSize;
+            canvas.height = chartSize;
+        }
 
         ctx.clearRect(0, 0, canvas.width, canvas.height);
 
@@ -202,10 +290,51 @@
 
     function setStatus(message, active){
         if (!elements.statusBar.length){ return; }
-        const fallback = (dash.l10n && dash.l10n.statusReady) ? dash.l10n.statusReady : 'Ready.';
-        const display = (typeof message === 'string' && message.length) ? message : fallback;
+        const display = (typeof message === 'string' && message.length) ? message : '';
         elements.statusBar.text(display);
-        elements.statusBar.toggleClass('is-active', !!active);
+        elements.statusBar.toggleClass('is-active', !!active && !!display);
+    }
+
+    function formatTime(){
+        const now = new Date();
+        return now.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+    }
+
+    function clearLog(){
+        if (elements.progressLog.length){
+            elements.progressLog.empty();
+        }
+    }
+
+    function pushLog(message, type){
+        if (!elements.progressLog.length || !message){ return; }
+        const $entry = $('<div class="ai-alt-progress-log__item"/>')
+            .attr('data-type', type || 'info')
+            .text(message);
+        elements.progressLog.prepend($entry);
+        const $entries = elements.progressLog.find('.ai-alt-progress-log__item');
+        if ($entries.length > LOG_LIMIT){
+            $entries.slice(LOG_LIMIT).remove();
+        }
+    }
+
+    function setButtonLoading($button, isLoading){
+        if (!$button || !$button.length){ return; }
+        const original = $button.data('label-original') || $button.text();
+        if (!$button.data('label-original')){
+            $button.data('label-original', original);
+        }
+
+        if (isLoading){
+            const loadingText = (dash.l10n && dash.l10n.loadingButton) || 'Processing…';
+            $button.text(loadingText).addClass('is-loading').prop('disabled', true);
+        } else {
+            const restore = $button.data('label-original');
+            if (restore){
+                $button.text(restore);
+            }
+            $button.removeClass('is-loading').prop('disabled', false);
+        }
     }
 
     function updateUsage(usage){
@@ -243,8 +372,6 @@
                 text: row.title || ('#' + row.id)
             }).appendTo($title);
             $tr.append($title);
-
-            $tr.append($('<td/>').addClass('ai-alt-audit__alt').text(row.alt || ''));
 
             const sourceKey = (row.source || 'unknown').toLowerCase();
             const sourceLabel = row.source_label || sourceKey.replace(/[-_]/g, ' ').replace(/\b\w/g, function(c){ return c.toUpperCase(); });
@@ -347,6 +474,16 @@
             coverage: Number(stats.coverage || 0)
         };
         drawChart(chartStats);
+        const complete = chartStats.missing <= 0;
+        if (elements.coverageBadge.length){
+            elements.coverageBadge.prop('hidden', !complete);
+        }
+        if (elements.coverageLegend.length){
+            elements.coverageLegend.prop('hidden', complete);
+        }
+        if (elements.coverageViz.length){
+            elements.coverageViz.attr('data-coverage-complete', complete ? '1' : '0');
+        }
         updateUsage(stats.usage || {});
         dash.auditPage = Number(stats.audit_page || dash.auditPage || 1);
         dash.auditPages = Number(stats.audit_pages || dash.auditPages || 1);
@@ -378,19 +515,19 @@
     dash.auditPage = dash.auditPage || (dash.stats && dash.stats.audit_page) || 1;
     dash.auditPages = dash.auditPages || (dash.stats && dash.stats.audit_pages) || 1;
     dash.auditLinks = dash.auditLinks || (dash.stats && dash.stats.audit_links) || '';
-    setStatus((dash.l10n && dash.l10n.statusReady) || '');
+    setStatus('', false);
 
     window.addEventListener('ai-alt-stats-update', function(evt){
         const detail = evt.detail || {};
         const stats = detail.stats || detail;
         renderStats(stats);
-        setStatus((dash.l10n && dash.l10n.statusReady) || '');
+        setStatus('', false);
     });
 
     function fetchStats(){
-        if (!dash.restStats){ return; }
+        if (!restEndpoints.stats){ return; }
 
-        const statsUrl = new URL(dash.restStats, window.location.origin);
+        const statsUrl = new URL(restEndpoints.stats, window.location.origin);
         if (dash.recentPage){
             statsUrl.searchParams.set('recent_page', dash.recentPage);
         }
@@ -404,25 +541,37 @@
             statsUrl.searchParams.set('audit_per_page', dash.auditPerPage);
         }
 
+        const headers = { 'Accept': 'application/json' };
+        if (nonce){ headers['X-WP-Nonce'] = nonce; }
+
         fetch(statsUrl.toString(), {
             credentials: 'same-origin',
-            headers: {
-                'X-WP-Nonce': dash.nonce,
-                'Accept': 'application/json'
-            }
-        }).then(function(res){
-            return res.ok ? res.json() : null;
-        }).then(function(data){
+            headers
+        }).then(parseResponse).then(function(data){
             if (data){
                 renderStats(data);
                 setStatus((dash.l10n && dash.l10n.statusReady) || '');
+            }
+        }).catch(function(err){
+            if (err && err.code === 'duplicate_alt'){ return Promise.resolve(); }
+            console.error('AI ALT stats fetch failed', err);
+            const errorMsg = formatErrorMessage(err);
+            setStatus(errorMsg, false);
+            if (window.aiAltToast){
+                window.aiAltToast.error('Stats Update Failed', errorMsg);
             }
         });
     }
 
     function seqGenerate(ids){
         if (!ids || !ids.length){
-            setStatus((dash.l10n && dash.l10n.statusReady) || '');
+            const time = formatTime();
+            const done = dash.l10n && dash.l10n.batchCompleteAt ? dash.l10n.batchCompleteAt.replace('%s', time) : ('Batch complete at ' + time);
+            setStatus(done, false);
+            pushLog(done, 'success');
+            if (window.aiAltToast){
+                window.aiAltToast.success('Batch Complete', 'All ALT text generation tasks finished successfully.');
+            }
             fetchStats();
             return Promise.resolve();
         }
@@ -430,59 +579,88 @@
         const id = ids.shift();
         const msg = dash.l10n && dash.l10n.processingMissing ? dash.l10n.processingMissing.replace('%d', id) : ('Generating ALT for #' + id + '…');
         setStatus(msg, true);
+        pushLog(msg + ' · ' + formatTime(), 'info');
 
-        return fetch((dash.rest || '') + id, {
+        if (!restEndpoints.generate){
+            setStatus((dash.l10n && dash.l10n.restUnavailable) || 'REST endpoint unavailable', false);
+            return Promise.reject(false);
+        }
+
+        const headers = { 'Accept': 'application/json' };
+        if (nonce){ headers['X-WP-Nonce'] = nonce; }
+
+        return fetch(restEndpoints.generate + id, {
             method: 'POST',
             credentials: 'same-origin',
-            headers: {
-                'X-WP-Nonce': dash.nonce,
-                'Accept': 'application/json'
-            }
-        }).then(function(res){
-            if (!res.ok){ return res.json().then(function(data){ throw data; }); }
-            return res.json();
-        }).then(function(){
+            headers
+        }).then(parseResponse).then(function(){
+            const done = dash.l10n && dash.l10n.completedItem ? dash.l10n.completedItem.replace('%d', id) : ('Finished #' + id);
+            pushLog(done + ' · ' + formatTime(), 'success');
             return seqGenerate(ids);
         }).catch(function(err){
-            const message = (err && err.message) || (err && err.data && err.data.message) || (dash.l10n && dash.l10n.error) || 'Failed to generate ALT.';
+            if (err && err.code === 'duplicate_alt'){
+                const next = ids.slice();
+                return seqGenerate(next);
+            }
+            console.error('AI ALT batch generation error', err);
+            const message = formatErrorMessage(err);
             setStatus(message, false);
+            const fail = dash.l10n && dash.l10n.failedItem ? dash.l10n.failedItem.replace('%d', id) : ('Failed #' + id);
+            pushLog(fail + ' · ' + formatTime() + ' — ' + message, 'error');
+            if (window.aiAltToast){
+                window.aiAltToast.error('Generation Failed', 'Failed to generate ALT for attachment #' + id + '. ' + message);
+            }
             fetchStats();
         });
     }
 
     function requestList(scope){
-        const endpoint = scope === 'all' ? (dash.restAll || '') : (dash.restMissing || '');
+        const endpoint = scope === 'all' ? restEndpoints.all : restEndpoints.missing;
         if (!endpoint){
             setStatus((dash.l10n && dash.l10n.restUnavailable) || 'REST endpoint unavailable', false);
             return Promise.reject();
         }
         setStatus((dash.l10n && dash.l10n.prepareBatch) || 'Preparing image list…', true);
+        const headers = { 'Accept': 'application/json' };
+        if (nonce){ headers['X-WP-Nonce'] = nonce; }
         return fetch(endpoint, {
             credentials: 'same-origin',
-            headers: {
-                'X-WP-Nonce': dash.nonce,
-                'Accept': 'application/json'
-            }
-        }).then(function(res){
-            if (!res.ok){ return res.json().then(function(data){ throw data; }); }
-            return res.json();
+            headers
+        }).then(parseResponse).then(function(data){
+            return data;
         });
     }
 
-    function handleGenerate(scope){
+    function handleGenerate(scope, $button){
+        if (!restEndpoints.generate){
+            setStatus((dash.l10n && dash.l10n.restUnavailable) || 'REST endpoint unavailable', false);
+            if ($button){ setButtonLoading($button, false); }
+            return;
+        }
         requestList(scope).then(function(payload){
             const ids = Array.isArray(payload.ids) ? payload.ids.slice() : [];
             if (!ids.length){
                 setStatus((dash.l10n && dash.l10n.nothingToProcess) || 'No images to process.', false);
+                const none = (dash.l10n && dash.l10n.nothingToProcess) || 'No images to process.';
+                pushLog(none + ' · ' + formatTime(), 'info');
                 fetchStats();
-                return;
+                return Promise.resolve();
             }
-            seqGenerate(ids);
+            clearLog();
+            pushLog(((dash.l10n && dash.l10n.batchStart) || 'Starting batch…') + ' (' + ids.length + ') · ' + formatTime(), 'info');
+            return seqGenerate(ids);
         }).catch(function(err){
             if (!err){ return; }
             if (err === false){ return; }
-            const message = (err && err.message) || (err && err.data && err.data.message) || (dash.l10n && dash.l10n.error) || 'Failed to generate ALT.';
+            if (err && err.code === 'duplicate_alt'){ return; }
+            console.error('AI ALT request list failed', err);
+            const message = formatErrorMessage(err);
             setStatus(message, false);
+            pushLog(message + ' · ' + formatTime(), 'error');
+        }).finally(function(){
+            if ($button){
+                setButtonLoading($button, false);
+            }
         });
     }
 
@@ -490,7 +668,9 @@
         elements.buttons.missing.on('click', function(e){
             e.preventDefault();
             if ($(this).prop('disabled')){ return; }
-            handleGenerate('missing');
+            const $btn = $(this);
+            setButtonLoading($btn, true);
+            handleGenerate('missing', $btn);
         });
     }
 
@@ -501,7 +681,205 @@
             if (!window.confirm(confirmMessage)){
                 return;
             }
-            handleGenerate('all');
+            const $btn = $(this);
+            setButtonLoading($btn, true);
+            handleGenerate('all', $btn);
         });
     }
+    // Toast Notification System
+    window.aiAltToast = (function(){
+        let container = null;
+        let toastId = 0;
+
+        function getContainer(){
+            if (!container){
+                container = document.createElement('div');
+                container.className = 'ai-alt-toast-container';
+                container.setAttribute('aria-live', 'polite');
+                container.setAttribute('aria-atomic', 'false');
+                document.body.appendChild(container);
+            }
+            return container;
+        }
+
+        function getIcon(type){
+            const icons = {
+                success: '✓',
+                error: '✕',
+                warning: '⚠',
+                info: 'ℹ'
+            };
+            return icons[type] || icons.info;
+        }
+
+        function show(options){
+            const id = ++toastId;
+            const type = options.type || 'info';
+            const title = options.title || '';
+            const message = options.message || '';
+            const duration = options.duration !== undefined ? options.duration : 5000;
+            const closeable = options.closeable !== false;
+
+            const toast = document.createElement('div');
+            toast.className = 'ai-alt-toast ai-alt-toast--' + type;
+            toast.setAttribute('role', 'status');
+            toast.setAttribute('data-toast-id', id);
+
+            const icon = document.createElement('div');
+            icon.className = 'ai-alt-toast__icon';
+            icon.textContent = getIcon(type);
+            icon.setAttribute('aria-hidden', 'true');
+
+            const content = document.createElement('div');
+            content.className = 'ai-alt-toast__content';
+
+            if (title){
+                const titleEl = document.createElement('div');
+                titleEl.className = 'ai-alt-toast__title';
+                titleEl.textContent = title;
+                content.appendChild(titleEl);
+            }
+
+            if (message){
+                const messageEl = document.createElement('p');
+                messageEl.className = 'ai-alt-toast__message';
+                messageEl.textContent = message;
+                content.appendChild(messageEl);
+            }
+
+            toast.appendChild(icon);
+            toast.appendChild(content);
+
+            if (closeable){
+                const closeBtn = document.createElement('button');
+                closeBtn.className = 'ai-alt-toast__close';
+                closeBtn.setAttribute('type', 'button');
+                closeBtn.setAttribute('aria-label', 'Close notification');
+                closeBtn.textContent = '×';
+                closeBtn.addEventListener('click', function(){
+                    remove(id);
+                });
+                toast.appendChild(closeBtn);
+            }
+
+            if (duration > 0){
+                const progress = document.createElement('div');
+                progress.className = 'ai-alt-toast__progress';
+                const progressBar = document.createElement('div');
+                progressBar.className = 'ai-alt-toast__progress-bar';
+                progressBar.style.width = '100%';
+                progressBar.style.transitionDuration = duration + 'ms';
+                progress.appendChild(progressBar);
+                toast.appendChild(progress);
+
+                requestAnimationFrame(function(){
+                    requestAnimationFrame(function(){
+                        progressBar.style.width = '0%';
+                    });
+                });
+
+                setTimeout(function(){
+                    remove(id);
+                }, duration);
+            }
+
+            getContainer().appendChild(toast);
+
+            return id;
+        }
+
+        function remove(id){
+            const toast = container ? container.querySelector('[data-toast-id="' + id + '"]') : null;
+            if (!toast){ return; }
+
+            toast.classList.add('is-leaving');
+            setTimeout(function(){
+                if (toast.parentNode){
+                    toast.parentNode.removeChild(toast);
+                }
+                if (container && container.children.length === 0){
+                    container.parentNode.removeChild(container);
+                    container = null;
+                }
+            }, 200);
+        }
+
+        function showWithRetry(title, message, retryCallback){
+            const id = ++toastId;
+            const toast = document.createElement('div');
+            toast.className = 'ai-alt-toast ai-alt-toast--error';
+            toast.setAttribute('role', 'alert');
+            toast.setAttribute('data-toast-id', id);
+
+            const icon = document.createElement('div');
+            icon.className = 'ai-alt-toast__icon';
+            icon.textContent = '✕';
+            icon.setAttribute('aria-hidden', 'true');
+
+            const content = document.createElement('div');
+            content.className = 'ai-alt-toast__content';
+
+            const titleEl = document.createElement('div');
+            titleEl.className = 'ai-alt-toast__title';
+            titleEl.textContent = title;
+            content.appendChild(titleEl);
+
+            if (message){
+                const messageEl = document.createElement('p');
+                messageEl.className = 'ai-alt-toast__message';
+                messageEl.textContent = message;
+                content.appendChild(messageEl);
+            }
+
+            const retryBtn = document.createElement('button');
+            retryBtn.className = 'ai-alt-button ai-alt-button--outline';
+            retryBtn.textContent = 'Retry';
+            retryBtn.style.marginTop = '8px';
+            retryBtn.style.fontSize = '12px';
+            retryBtn.style.padding = '6px 14px';
+            retryBtn.addEventListener('click', function(){
+                remove(id);
+                if (typeof retryCallback === 'function'){
+                    retryCallback();
+                }
+            });
+            content.appendChild(retryBtn);
+
+            toast.appendChild(icon);
+            toast.appendChild(content);
+
+            const closeBtn = document.createElement('button');
+            closeBtn.className = 'ai-alt-toast__close';
+            closeBtn.setAttribute('type', 'button');
+            closeBtn.setAttribute('aria-label', 'Close notification');
+            closeBtn.textContent = '×';
+            closeBtn.addEventListener('click', function(){
+                remove(id);
+            });
+            toast.appendChild(closeBtn);
+
+            getContainer().appendChild(toast);
+
+            return id;
+        }
+
+        return {
+            show: show,
+            success: function(title, message, duration){
+                return show({ type: 'success', title: title, message: message, duration: duration });
+            },
+            error: function(title, message, duration){
+                return show({ type: 'error', title: title, message: message, duration: duration || 7000 });
+            },
+            warning: function(title, message, duration){
+                return show({ type: 'warning', title: title, message: message, duration: duration });
+            },
+            info: function(title, message, duration){
+                return show({ type: 'info', title: title, message: message, duration: duration });
+            },
+            errorWithRetry: showWithRetry,
+            remove: remove
+        };
+    })();
+
 })(jQuery);
