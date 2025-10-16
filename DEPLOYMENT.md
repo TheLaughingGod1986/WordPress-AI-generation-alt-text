@@ -404,3 +404,4 @@ Create `/assets/` folder (separate from plugin):
 
 **This plugin is ready to serve thousands of WordPress sites worldwide!** 🌟
 
+

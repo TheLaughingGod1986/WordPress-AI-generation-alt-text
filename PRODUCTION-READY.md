@@ -454,3 +454,4 @@ Your plugin is ready to make the web more accessible, one image at a time.
 
 **Let's ship it!** 🚀
 
+
