@@ -1572,7 +1572,19 @@ class AI_Alt_Text_Generator_GPT {
         }
 
         $message = strtolower($error->get_error_message());
-        $needles = ['error while downloading', 'failed to download', 'unsupported image url'];
+        $needles = [
+            'error while downloading', 
+            'failed to download', 
+            'unsupported image url',
+            'http 500',
+            'http 404',
+            'http 403',
+            'server error',
+            'not found',
+            'forbidden',
+            'timeout',
+            'connection refused'
+        ];
         foreach ($needles as $needle){
             if (strpos($message, $needle) !== false){
                 return true;
@@ -1618,7 +1630,7 @@ class AI_Alt_Text_Generator_GPT {
             return new \WP_Error('inline_image_too_large', __('Image exceeds the inline embedding size limit.', 'ai-alt-gpt'), ['size' => $size, 'limit' => $limit]);
         }
 
-        $contents = file_get_contents($file);
+        $contents = $this->download_image_with_fallback($file);
         if ($contents === false){
             return new \WP_Error('inline_image_read_failed', __('Unable to read the image file for inline embedding.', 'ai-alt-gpt'));
         }
@@ -1734,6 +1746,96 @@ class AI_Alt_Text_Generator_GPT {
                 $delay,
                 $data['error']['message'] ?? 'Unknown rate limit error'
             ));
+        }
+    }
+
+    /**
+     * Download image with multiple fallback strategies for better reliability
+     */
+    private function download_image_with_fallback(string $file_path): string|false {
+        // Strategy 1: Try file_get_contents for local files
+        if (!filter_var($file_path, FILTER_VALIDATE_URL)) {
+            $contents = @file_get_contents($file_path);
+            if ($contents !== false) {
+                return $contents;
+            }
+        }
+        
+        // Strategy 2: Use wp_remote_get for remote URLs with proper headers
+        if (filter_var($file_path, FILTER_VALIDATE_URL)) {
+            $response = wp_remote_get($file_path, [
+                'timeout' => 30,
+                'user-agent' => 'WordPress/' . get_bloginfo('version') . '; ' . home_url(),
+                'headers' => [
+                    'Accept' => 'image/*',
+                    'Cache-Control' => 'no-cache'
+                ],
+                'sslverify' => false, // Allow self-signed certificates
+                'redirection' => 5
+            ]);
+            
+            if (!is_wp_error($response)) {
+                $code = wp_remote_retrieve_response_code($response);
+                if ($code === 200) {
+                    return wp_remote_retrieve_body($response);
+                } else {
+                    $this->log_image_download_error($file_path, "HTTP {$code}", $response);
+                }
+            } else {
+                $this->log_image_download_error($file_path, $response->get_error_message(), $response);
+            }
+        }
+        
+        // Strategy 3: Try cURL as last resort
+        if (function_exists('curl_init')) {
+            $ch = curl_init();
+            curl_setopt_array($ch, [
+                CURLOPT_URL => $file_path,
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_FOLLOWLOCATION => true,
+                CURLOPT_MAXREDIRS => 5,
+                CURLOPT_TIMEOUT => 30,
+                CURLOPT_USERAGENT => 'WordPress/' . get_bloginfo('version') . '; ' . home_url(),
+                CURLOPT_SSL_VERIFYPEER => false,
+                CURLOPT_SSL_VERIFYHOST => false,
+                CURLOPT_HTTPHEADER => [
+                    'Accept: image/*',
+                    'Cache-Control: no-cache'
+                ]
+            ]);
+            
+            $contents = curl_exec($ch);
+            $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $curl_error = curl_error($ch);
+            curl_close($ch);
+            
+            if ($contents !== false && $http_code === 200) {
+                return $contents;
+            } else {
+                $this->log_image_download_error($file_path, "cURL error: {$curl_error} (HTTP {$http_code})", null);
+            }
+        }
+        
+        return false;
+    }
+    
+    /**
+     * Log image download errors for debugging
+     */
+    private function log_image_download_error(string $file_path, string $error, $response = null): void {
+        if (defined('WP_DEBUG') && WP_DEBUG) {
+            $log_message = sprintf(
+                '[AI Alt GPT] Image download failed for %s: %s',
+                $file_path,
+                $error
+            );
+            
+            if ($response && is_array($response)) {
+                $headers = wp_remote_retrieve_headers($response);
+                $log_message .= ' | Headers: ' . wp_json_encode($headers->getAll());
+            }
+            
+            error_log($log_message);
         }
     }
 
