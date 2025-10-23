@@ -1645,6 +1645,98 @@ class AI_Alt_Text_Generator_GPT {
         ];
     }
 
+    /**
+     * Make OpenAI API request with rate limit handling and retry logic
+     */
+    private function make_openai_request(string $url, array $args, int $max_retries = 3): mixed {
+        $retry_count = 0;
+        $base_delay = 1; // Start with 1 second delay
+        
+        while ($retry_count <= $max_retries) {
+            $response = wp_remote_post($url, $args);
+            
+            if (is_wp_error($response)) {
+                return $response;
+            }
+            
+            $code = wp_remote_retrieve_response_code($response);
+            $raw_body = wp_remote_retrieve_body($response);
+            $data = json_decode($raw_body, true);
+            
+            // Handle rate limiting (HTTP 429)
+            if ($code === 429) {
+                $retry_after = $this->extract_retry_after($response, $data);
+                $delay = $retry_after ?: ($base_delay * pow(2, $retry_count)); // Exponential backoff
+                
+                if ($retry_count < $max_retries) {
+                    $this->log_rate_limit($retry_count + 1, $delay, $data);
+                    sleep($delay);
+                    $retry_count++;
+                    continue;
+                } else {
+                    return new \WP_Error(
+                        'rate_limit_exceeded',
+                        sprintf(
+                            __('Rate limit exceeded. Please try again in %d seconds. Visit %s to check your usage limits.', 'ai-alt-gpt'),
+                            $retry_after ?: 60,
+                            'https://platform.openai.com/account/rate-limits'
+                        )
+                    );
+                }
+            }
+            
+            // Handle other HTTP errors
+            if ($code >= 400) {
+                $error_message = $data['error']['message'] ?? sprintf(__('HTTP %d error', 'ai-alt-gpt'), $code);
+                return new \WP_Error('openai_api_error', $error_message);
+            }
+            
+            // Success - return the response
+            return $response;
+        }
+        
+        return new \WP_Error('max_retries_exceeded', __('Maximum retry attempts exceeded', 'ai-alt-gpt'));
+    }
+    
+    /**
+     * Extract retry-after header or calculate from rate limit info
+     */
+    private function extract_retry_after($response, array $data): int {
+        $headers = wp_remote_retrieve_headers($response);
+        $retry_after = $headers['retry-after'] ?? null;
+        
+        if ($retry_after) {
+            return intval($retry_after);
+        }
+        
+        // Parse rate limit info from error response
+        if (isset($data['error']['message'])) {
+            $message = $data['error']['message'];
+            if (preg_match('/try again in (\d+)ms/', $message, $matches)) {
+                return intval($matches[1]) / 1000; // Convert ms to seconds
+            }
+            if (preg_match('/try again in (\d+)s/', $message, $matches)) {
+                return intval($matches[1]);
+            }
+        }
+        
+        return 0; // No specific retry time found
+    }
+    
+    /**
+     * Log rate limit events for debugging
+     */
+    private function log_rate_limit(int $attempt, int $delay, array $data): void {
+        if (defined('WP_DEBUG') && WP_DEBUG) {
+            error_log(sprintf(
+                '[AI Alt GPT] Rate limit hit - Attempt %d, waiting %d seconds. Error: %s',
+                $attempt,
+                $delay,
+                $data['error']['message'] ?? 'Unknown rate limit error'
+            ));
+        }
+    }
+
     private function review_alt_text_with_model(int $attachment_id, string $alt, string $image_strategy, $image_payload_used, array $opts, string $api_key){
         $alt = trim((string) $alt);
         if ($alt === ''){
@@ -1737,7 +1829,7 @@ class AI_Alt_Text_Generator_GPT {
             'max_tokens' => 280,
         ];
 
-        $response = wp_remote_post('https://api.openai.com/v1/chat/completions', [
+        $response = $this->make_openai_request('https://api.openai.com/v1/chat/completions', [
             'headers' => [
                 'Authorization' => 'Bearer ' . $api_key,
                 'Content-Type'  => 'application/json',
@@ -1914,7 +2006,7 @@ class AI_Alt_Text_Generator_GPT {
                 'max_tokens'  => 80,
             ];
 
-            $response = wp_remote_post('https://api.openai.com/v1/chat/completions', [
+            $response = $this->make_openai_request('https://api.openai.com/v1/chat/completions', [
                 'headers' => [
                     'Authorization' => 'Bearer ' . $api_key,
                     'Content-Type'  => 'application/json',
